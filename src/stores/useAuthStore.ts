@@ -11,12 +11,8 @@ import type {
   ConnectionStatus,
   RestoreOutcome,
 } from '@/types';
-import {
-  LEGACY_AUTH_STORAGE_KEYS,
-  STORAGE_KEY_AUTH,
-  STORAGE_KEY_AUTH_SESSION,
-} from '@/utils/constants';
-import { obfuscatedSessionStorage, obfuscatedStorage } from '@/services/storage/secureStorage';
+import { STORAGE_KEY_AUTH } from '@/utils/constants';
+import { obfuscatedStorage } from '@/services/storage/secureStorage';
 import { apiClient } from '@/services/api/client';
 import { isRetryableConnectionError } from '@/services/api/apiError';
 import { useConfigStore } from './useConfigStore';
@@ -37,8 +33,6 @@ interface AuthStoreState extends AuthState {
   updateServerPluginSupport: (supportsPlugin: boolean) => void;
 }
 
-type SavedSession = Required<LoginCredentials>;
-
 let restoreSessionPromise: Promise<RestoreOutcome> | null = null;
 // Bumped by every login and logout, so an attempt that was overtaken never commits its result.
 let loginGeneration = 0;
@@ -47,60 +41,6 @@ const supersededLogin = () => {
   const error = new Error('Sign-in was superseded by a newer attempt');
   error.name = 'LoginSupersededError';
   return error;
-};
-
-/**
- * Releases before the auth store kept the session in loose keys and gated auto-login on
- * `isLoggedIn`; logging out cleared only the flag. Read them once, then remove them.
- */
-const takeLegacySession = (): SavedSession | null => {
-  obfuscatedStorage.migratePlaintextKeys(['apiBase', 'apiUrl', 'managementKey']);
-  const wasLoggedIn = localStorage.getItem('isLoggedIn') === 'true';
-  const base =
-    obfuscatedStorage.getItem<string>('apiBase') ||
-    obfuscatedStorage.getItem<string>('apiUrl', { encrypt: true });
-  const key = obfuscatedStorage.getItem<string>('managementKey');
-  LEGACY_AUTH_STORAGE_KEYS.forEach((name) => localStorage.removeItem(name));
-  if (!wasLoggedIn || typeof key !== 'string' || !key) return null;
-  return {
-    apiBase: normalizeApiBase(base || detectApiBaseFromLocation()),
-    managementKey: key,
-    rememberPassword: true,
-  };
-};
-
-/**
- * The session to restore, newest owner first: this tab, then the remembered sign-in, then a
- * legacy one. Address, key and remember choice always come from one source; mixing them
- * could send one server's key to another, or remember a key the user chose not to.
- */
-const resolveSavedSession = (state: AuthState): SavedSession | null => {
-  const legacy = takeLegacySession();
-  const tab = obfuscatedSessionStorage.getItem<Partial<SavedSession>>(STORAGE_KEY_AUTH_SESSION);
-  if (tab?.apiBase && tab.managementKey) {
-    return {
-      apiBase: normalizeApiBase(tab.apiBase),
-      managementKey: tab.managementKey,
-      rememberPassword: tab.rememberPassword === true,
-    };
-  }
-  if (state.managementKey) {
-    return {
-      apiBase: normalizeApiBase(state.apiBase || detectApiBaseFromLocation()),
-      managementKey: state.managementKey,
-      rememberPassword: state.rememberPassword,
-    };
-  }
-  return legacy;
-};
-
-const keepSessionForTab = (session: SavedSession) => {
-  try {
-    obfuscatedSessionStorage.setItem(STORAGE_KEY_AUTH_SESSION, session);
-  } catch (error) {
-    // Costs only staying signed in across a reload; the sign-in itself succeeded.
-    console.warn('Could not keep the session for this tab:', error);
-  }
 };
 
 export const useAuthStore = create<AuthStoreState>()(
@@ -123,10 +63,39 @@ export const useAuthStore = create<AuthStoreState>()(
 
         const attempt: Promise<RestoreOutcome> = (async (): Promise<RestoreOutcome> => {
           try {
-            const session = resolveSavedSession(get());
-            if (!session) return { status: 'none' };
-            set(session);
-            await get().login(session);
+            obfuscatedStorage.migratePlaintextKeys(['apiBase', 'apiUrl', 'managementKey']);
+
+            // Logout (in any tab) clears this flag, so a key another tab still holds, or one an
+            // older release copied in without signing in, never signs this page in by itself.
+            const wasLoggedIn = localStorage.getItem('isLoggedIn') === 'true';
+            const legacyBase =
+              obfuscatedStorage.getItem<string>('apiBase') ||
+              obfuscatedStorage.getItem<string>('apiUrl', { encrypt: true });
+            const legacyKey = obfuscatedStorage.getItem<string>('managementKey');
+
+            const { apiBase, managementKey, rememberPassword } = get();
+            const resolvedBase = normalizeApiBase(
+              apiBase || legacyBase || detectApiBaseFromLocation()
+            );
+            const resolvedKey = managementKey || legacyKey || '';
+            const resolvedRememberPassword =
+              rememberPassword || Boolean(managementKey) || Boolean(legacyKey);
+
+            set({
+              apiBase: resolvedBase,
+              managementKey: resolvedKey,
+              rememberPassword: resolvedRememberPassword,
+            });
+
+            if (!wasLoggedIn || !resolvedBase || !resolvedKey) {
+              return { status: 'none' };
+            }
+
+            await get().login({
+              apiBase: resolvedBase,
+              managementKey: resolvedKey,
+              rememberPassword: resolvedRememberPassword,
+            });
             return { status: 'restored' };
           } catch (error) {
             console.warn('Auto login failed:', error);
@@ -176,7 +145,6 @@ export const useAuthStore = create<AuthStoreState>()(
           await useConfigStore.getState().fetchConfig(true);
           if (generation !== loginGeneration) throw supersededLogin();
 
-          keepSessionForTab({ apiBase, managementKey, rememberPassword });
           // 登录成功
           set({
             isAuthenticated: true,
@@ -185,6 +153,11 @@ export const useAuthStore = create<AuthStoreState>()(
             rememberPassword,
             connectionStatus: 'connected',
           });
+          if (rememberPassword) {
+            localStorage.setItem('isLoggedIn', 'true');
+          } else {
+            localStorage.removeItem('isLoggedIn');
+          }
         } catch (error: unknown) {
           if (generation === loginGeneration) set({ connectionStatus: 'error' });
           throw error;
@@ -207,7 +180,7 @@ export const useAuthStore = create<AuthStoreState>()(
           supportsPlugin: false,
           connectionStatus: 'disconnected',
         });
-        obfuscatedSessionStorage.removeItem(STORAGE_KEY_AUTH_SESSION);
+        localStorage.removeItem('isLoggedIn');
       },
 
       // 更新服务器版本

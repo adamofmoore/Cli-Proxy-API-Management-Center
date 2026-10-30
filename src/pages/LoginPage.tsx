@@ -119,7 +119,7 @@ export function LoginPage() {
   // Any edit to the form is the user taking over: automatic restoring stops for good.
   const stopRestoring = useCallback(() => {
     setRetrying(false);
-    return restorer.current?.stop() ?? Promise.resolve();
+    restorer.current?.stop();
   }, []);
 
   const detectedBase = useMemo(() => detectApiBaseFromLocation(), []);
@@ -175,9 +175,13 @@ export function LoginPage() {
     });
     restorer.current = retry;
     retry.start(redirectState?.restoreFailure);
+    if (redirectState?.restoreFailure) {
+      // History state survives a reload: consume the handed-over failure so a reload retries.
+      navigate(location.pathname, { replace: true, state: { from: fromState } });
+    }
 
     return () => {
-      void retry.stop();
+      retry.stop();
       if (redirectTimer !== null) window.clearTimeout(redirectTimer);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -192,9 +196,9 @@ export function LoginPage() {
     const baseToUse = apiBase ? normalizeApiBase(apiBase) : detectedBase;
     setLoading(true);
     setError('');
+    // The automatic attempt this replaces is cancelled, and its late answers are ignored.
+    stopRestoring();
     try {
-      // An automatic attempt still waiting on the proxy must finish before this one starts.
-      await stopRestoring();
       await login({
         apiBase: baseToUse,
         managementKey: managementKey.trim(),
@@ -294,7 +298,10 @@ export function LoginPage() {
               <div className={styles.toggleAdvanced}>
                 <SelectionCheckbox
                   checked={showCustomBase}
-                  onChange={setShowCustomBase}
+                  onChange={(checked) => {
+                    stopRestoring();
+                    setShowCustomBase(checked);
+                  }}
                   ariaLabel={t('login.custom_connection_label')}
                   label={t('login.custom_connection_label')}
                   labelClassName={styles.toggleLabel}
@@ -307,7 +314,7 @@ export function LoginPage() {
                   placeholder={t('login.custom_connection_placeholder')}
                   value={apiBase}
                   onChange={(e) => {
-                    void stopRestoring();
+                    stopRestoring();
                     setApiBase(e.target.value);
                   }}
                   hint={t('login.custom_connection_hint')}
@@ -323,7 +330,7 @@ export function LoginPage() {
                 autoComplete="current-password"
                 value={managementKey}
                 onChange={(e) => {
-                  void stopRestoring();
+                  stopRestoring();
                   setManagementKey(e.target.value);
                 }}
                 onKeyDown={handleSubmitKeyDown}
@@ -352,7 +359,7 @@ export function LoginPage() {
                 <SelectionCheckbox
                   checked={rememberPassword}
                   onChange={(checked) => {
-                    void stopRestoring();
+                    stopRestoring();
                     setRememberPassword(checked);
                   }}
                   ariaLabel={t('login.remember_password_label')}

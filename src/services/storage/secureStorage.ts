@@ -22,8 +22,6 @@ interface StorageOptions {
 }
 
 class ObfuscatedStorageService {
-  constructor(private readonly backend: () => Storage) {}
-
   /**
    * 存储数据
    */
@@ -38,7 +36,7 @@ class ObfuscatedStorageService {
     const stringValue = JSON.stringify(value);
     const storedValue = obfuscate ? obfuscateData(stringValue) : stringValue;
 
-    this.backend().setItem(key, storedValue);
+    localStorage.setItem(key, storedValue);
   }
 
   /**
@@ -47,7 +45,7 @@ class ObfuscatedStorageService {
   getItem<T = unknown>(key: string, options: StorageOptions = {}): T | null {
     const obfuscate = options.obfuscate ?? options.encrypt ?? true;
 
-    const raw = this.backend().getItem(key);
+    const raw = localStorage.getItem(key);
     if (raw === null) return null;
 
     try {
@@ -89,7 +87,7 @@ class ObfuscatedStorageService {
    * 删除数据
    */
   removeItem(key: string): void {
-    this.backend().removeItem(key);
+    localStorage.removeItem(key);
   }
 
   /**
@@ -97,7 +95,7 @@ class ObfuscatedStorageService {
    */
   migratePlaintextKeys(keys: string[]): void {
     keys.forEach((key) => {
-      const raw = this.backend().getItem(key);
+      const raw = localStorage.getItem(key);
       if (!raw) return;
 
       // 如果已经是加密格式，跳过
@@ -122,7 +120,4 @@ class ObfuscatedStorageService {
   }
 }
 
-export const obfuscatedStorage = new ObfuscatedStorageService(() => localStorage);
-
-/** Lives as long as the browser tab: survives reloads, cleared when the tab closes. */
-export const obfuscatedSessionStorage = new ObfuscatedStorageService(() => sessionStorage);
+export const obfuscatedStorage = new ObfuscatedStorageService();

@@ -53,7 +53,7 @@ export const SAVED_AUTH = JSON.stringify({
 });
 
 const g = globalThis as unknown as Record<string, unknown>;
-const INSTALLED_GLOBALS = ['localStorage', 'sessionStorage', 'window'] as const;
+const INSTALLED_GLOBALS = ['localStorage', 'window'] as const;
 let saved: { globals: Map<string, PropertyDescriptor | undefined>; userAgent?: PropertyDescriptor } | null =
   null;
 
@@ -67,7 +67,6 @@ export function installBrowserEnv(userAgent = CHROME_141) {
   }
   const events = new EventTarget();
   g.localStorage = new MemoryStorage();
-  g.sessionStorage = new MemoryStorage();
   g.window = {
     location: { protocol: 'http:', hostname: 'localhost', port: '8317', host: BROWSER_HOST },
     addEventListener: events.addEventListener.bind(events),

@@ -16,7 +16,7 @@ import { configApi, versionApi } from '@/services/api';
 import { useApiKeysForModels } from '@/hooks/useApiKeysForModels';
 import { formatDateTimeValue } from '@/utils/format';
 import { classifyModels } from '@/utils/models';
-import { LEGACY_AUTH_STORAGE_KEYS, STORAGE_KEY_AUTH } from '@/utils/constants';
+import { STORAGE_KEY_AUTH } from '@/utils/constants';
 import { INLINE_LOGO_JPEG } from '@/assets/logoInline';
 import iconGemini from '@/assets/icons/gemini.svg';
 import iconClaude from '@/assets/icons/claude.svg';
@@ -163,8 +163,10 @@ export function SystemPage() {
       confirmText: t('common.confirm'),
       onConfirm: () => {
         auth.logout();
+        // Logout keeps the server address for the login form; clearing login data forgets it too.
+        useAuthStore.setState({ apiBase: '' });
         if (typeof localStorage === 'undefined') return;
-        const keysToRemove = [STORAGE_KEY_AUTH, ...LEGACY_AUTH_STORAGE_KEYS];
+        const keysToRemove = [STORAGE_KEY_AUTH, 'isLoggedIn', 'apiBase', 'apiUrl', 'managementKey'];
         keysToRemove.forEach((key) => localStorage.removeItem(key));
         showNotification(t('notification.login_storage_cleared'), 'success');
       },

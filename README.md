@@ -123,7 +123,7 @@ The UI language is automatically detected from browser settings and can be manua
 
 - The management key is stored using a lightweight obfuscation format (`enc::v2::...`) to avoid plaintext storage; it is not encryption, so treat it as sensitive.
   - With **Remember password**, it is kept in `localStorage` and survives closing the browser.
-  - Without it, it is kept for the tab only (`sessionStorage`), so a reload stays signed in. Browsers copy that storage into tabs opened from this one and restore it with a restored session.
+  - Without it, the key is kept in memory only, so a reload signs you out.
   - Values saved by older releases (`enc::v1::...`, keyed to the browser version) are read once and rewritten; an older build cannot read the new format and asks you to sign in again.
 - Use a dedicated browser profile/device for management. Be cautious when enabling remote management and evaluate its exposure surface.
 

@@ -91,16 +91,25 @@ describe('restoring with retries', () => {
     expect(h.pendingDelays()).toEqual([]);
   });
 
-  test('gives up once the proxy has been unreachable for the whole retry window', async () => {
+  test('never starts an attempt later than the retry window, then gives up', async () => {
     const h = harness(Array.from({ length: 100 }, () => unreachable));
+    const startedAt: number[] = [];
+    let clock = 0;
     h.retry.start();
     await h.flush();
-    while (h.pendingDelays().length) await h.advance(h.pendingDelays()[0]);
+    startedAt.push(clock);
+    while (h.pendingDelays().length) {
+      const delay = h.pendingDelays()[0];
+      clock += delay;
+      await h.advance(delay);
+      startedAt.push(clock);
+    }
 
     expect(h.updates.at(-1)).toEqual({ outcome: unreachable, retrying: false });
-    expect(h.attempts()).toBeLessThan(30);
-    expect(h.updates.filter((u) => u.retrying).length).toBe(h.attempts() - 1);
-    expect(RETRY_WINDOW_MS).toBe(5 * 60 * 1000);
+    expect(Math.max(...startedAt)).toBeLessThanOrEqual(RETRY_WINDOW_MS);
+    // The next 15s retry would have started past the window.
+    expect(Math.max(...startedAt) + 15000).toBeGreaterThan(RETRY_WINDOW_MS);
+    expect(h.attempts()).toBe(startedAt.length);
   });
 
   test('does not retry a rejected key', async () => {
@@ -130,21 +139,16 @@ describe('restoring with retries', () => {
     expect(h.updates.at(-1)?.retrying).toBe(false);
   });
 
-  test('stop() silences an attempt already in flight and waits for it to settle', async () => {
+  test('stop() cancels an attempt already in flight and ignores its answer', async () => {
     const h = harness([unreachable]);
     h.holdNextAnswer();
     h.retry.start();
 
-    let stopped = false;
-    const stopping = h.retry.stop().then(() => {
-      stopped = true;
-    });
-    await h.flush();
-    expect(stopped).toBe(false);
-
+    h.retry.stop();
     expect(h.cancels()).toBe(1);
     h.releaseHeldAnswer();
-    await stopping;
+    await h.flush();
+
     expect(h.updates).toEqual([]);
     expect(h.pendingDelays()).toEqual([]);
   });
@@ -153,7 +157,7 @@ describe('restoring with retries', () => {
     const h = harness([unreachable]);
     h.retry.start();
     await h.flush();
-    await h.retry.stop();
+    h.retry.stop();
     await h.advance(60_000);
 
     expect(h.attempts()).toBe(1);

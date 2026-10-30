@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import type { Config } from '../src/types';
 import { useConfigStore } from '../src/stores/useConfigStore';
-import { obfuscatedSessionStorage, obfuscatedStorage } from '../src/services/storage/secureStorage';
+import { apiClient } from '../src/services/api/client';
+import { obfuscatedStorage } from '../src/services/storage/secureStorage';
 import {
   CHROME_141,
   CHROME_142,
@@ -16,20 +17,19 @@ type AuthModule = typeof import('../src/stores/useAuthStore');
 type AuthStore = AuthModule['useAuthStore'];
 
 const SERVER_A = 'http://server-a:8317';
-const SERVER_B = 'http://server-b:8317';
 
-// Each call is a page reload: a fresh store that hydrates from whatever storage survived.
+// Each call is a page reload (or another tab): a fresh store hydrated from shared storage.
 const reloadPage = async (): Promise<AuthStore> =>
   (await freshImport<AuthModule>('../src/stores/useAuthStore.ts')).useAuthStore;
 
 const originalFetchConfig = useConfigStore.getState().fetchConfig;
 let configRequests: string[] = [];
+// The key the API client sends: whatever the latest login configured, read when the request starts.
+const sentKey = () => (apiClient as unknown as { managementKey: string }).managementKey;
 const proxyAnswers = (respond: (key: string) => Promise<Config>) => {
   useConfigStore.setState({
-    fetchConfig: async () => {
-      // The key the API client would send: the one the latest login configured.
-      const { apiClient } = await import('../src/services/api/client');
-      const key = (apiClient as unknown as { managementKey: string }).managementKey;
+    fetchConfig: () => {
+      const key = sentKey();
       configRequests.push(key);
       return respond(key);
     },
@@ -40,15 +40,17 @@ const proxyRestarting = () =>
   proxyAnswers(async () => {
     throw Object.assign(new Error('Network Error'), { code: 'ERR_NETWORK' });
   });
+// What the real client does on a 401: announce it (the store logs out), then reject.
 const proxyRejectsKey = () =>
   proxyAnswers(async () => {
+    window.dispatchEvent(new Event('unauthorized'));
     throw Object.assign(new Error('invalid management key'), { status: 401 });
   });
 
-const signIn = (store: AuthStore, rememberPassword: boolean, apiBase = SERVER_A, key = 'sk-a') =>
-  store.getState().login({ apiBase, managementKey: key, rememberPassword });
+const signIn = (store: AuthStore, rememberPassword: boolean, key = 'sk-a') =>
+  store.getState().login({ apiBase: SERVER_A, managementKey: key, rememberPassword });
 
-const rememberedState = () =>
+const savedState = () =>
   obfuscatedStorage.getItem<{ state: Record<string, unknown> }>('cli-proxy-auth')?.state ?? {};
 
 describe('restoring a sign-in', () => {
@@ -68,62 +70,41 @@ describe('restoring a sign-in', () => {
     const store = await reloadPage();
     expect(await store.getState().restoreSession()).toEqual({ status: 'restored' });
     expect(store.getState().isAuthenticated).toBe(true);
+    expect(configRequests.at(-1)).toBe('sk-a');
   });
 
-  test('without remember-password, a reload in the same tab stays signed in', async () => {
+  test('without remember-password, nothing is saved and a reload signs out', async () => {
     await signIn(await reloadPage(), false);
+    expect(savedState().managementKey).toBeUndefined();
 
-    const store = await reloadPage();
-    expect(await store.getState().restoreSession()).toEqual({ status: 'restored' });
-    expect(rememberedState().managementKey).toBeUndefined();
-  });
-
-  test('without remember-password, the key is never remembered, even across failed restores', async () => {
-    await signIn(await reloadPage(), false);
-    const store = await reloadPage();
-
-    proxyRestarting();
-    await store.getState().restoreSession();
-    proxyUp();
-    expect(await store.getState().restoreSession()).toEqual({ status: 'restored' });
-
-    expect(rememberedState().managementKey).toBeUndefined();
-    expect(rememberedState().rememberPassword).toBe(false);
-  });
-
-  test('without remember-password, a fresh browser session is signed out', async () => {
-    await signIn(await reloadPage(), false);
-
-    sessionStorage.clear();
     const store = await reloadPage();
     expect(await store.getState().restoreSession()).toEqual({ status: 'none' });
   });
 
-  test("a tab never sends its key to the server another tab signed into", async () => {
-    // Tab 1 signs into A; tab 2 (same browser, its own tab storage) signs into B. Neither remembers.
-    await signIn(await reloadPage(), false, SERVER_A, 'sk-a');
-    const tab1Session = sessionStorage.getItem('cli-proxy-auth-session');
-    sessionStorage.clear();
-    await signIn(await reloadPage(), false, SERVER_B, 'sk-b');
+  test('logging out in one tab is not undone by another tab that still holds the key', async () => {
+    const otherTab = await reloadPage();
+    await signIn(otherTab, true);
+    const thisTab = await reloadPage();
+    await thisTab.getState().restoreSession();
 
-    // Tab 1 reloads: the shared storage now names B.
-    sessionStorage.clear();
-    sessionStorage.setItem('cli-proxy-auth-session', tab1Session as string);
-    const store = await reloadPage();
-    configRequests = [];
-    expect(await store.getState().restoreSession()).toEqual({ status: 'restored' });
-    expect(store.getState().apiBase).toBe(SERVER_A);
-    expect(configRequests).toEqual(['sk-a']);
+    thisTab.getState().logout();
+    // The other tab is still signed in, and any update rewrites its state, key included.
+    otherTab.getState().updateServerVersion('v8.0.23');
+    expect(savedState().managementKey).toBe('sk-a');
+
+    const newTab = await reloadPage();
+    expect(await newTab.getState().restoreSession()).toEqual({ status: 'none' });
   });
 
-  test('signing out forgets the key but keeps the server address for the login form', async () => {
-    const first = await reloadPage();
-    await signIn(first, false);
-    first.getState().logout();
-    expect(first.getState().apiBase).toBe(SERVER_A);
+  test('a key saved without a sign-in (as an older release migrated it) does not sign in', async () => {
+    obfuscatedStorage.setItem('cli-proxy-auth', {
+      state: { apiBase: SERVER_A, managementKey: 'sk-a', rememberPassword: true },
+      version: 0,
+    });
 
     const store = await reloadPage();
     expect(await store.getState().restoreSession()).toEqual({ status: 'none' });
+    expect(configRequests).toEqual([]);
   });
 
   test('a reload while the proxy restarts keeps the key, and the next attempt gets back in', async () => {
@@ -131,15 +112,17 @@ describe('restoring a sign-in', () => {
     const store = await reloadPage();
 
     proxyRestarting();
-    const failed = await store.getState().restoreSession();
-    expect(failed).toMatchObject({ status: 'failed', retryable: true });
+    expect(await store.getState().restoreSession()).toMatchObject({
+      status: 'failed',
+      retryable: true,
+    });
     expect(store.getState().managementKey).toBe('sk-a');
 
     proxyUp();
     expect(await store.getState().restoreSession()).toEqual({ status: 'restored' });
   });
 
-  test('a rejected key is not worth retrying', async () => {
+  test('a rejected key signs out, is not retried, and keeps the server address for the form', async () => {
     await signIn(await reloadPage(), true);
     const store = await reloadPage();
 
@@ -148,12 +131,15 @@ describe('restoring a sign-in', () => {
       status: 'failed',
       retryable: false,
     });
+    expect(store.getState().managementKey).toBe('');
+    expect(store.getState().apiBase).toBe(SERVER_A);
+    expect(localStorage.getItem('isLoggedIn')).toBeNull();
   });
 
   test('storage that throws ends in a failure, not a restore that never settles', async () => {
-    await signIn(await reloadPage(), false);
+    await signIn(await reloadPage(), true);
     const store = await reloadPage();
-    sessionStorage.getItem = () => {
+    localStorage.getItem = () => {
       throw new DOMException('denied', 'SecurityError');
     };
 
@@ -189,47 +175,28 @@ describe('restoring a sign-in', () => {
 
   test('a sign-in overtaken by a newer one never commits its credentials', async () => {
     const store = await reloadPage();
-    let answerFirst: () => void = () => {};
+    let answerOld: () => void = () => {};
     proxyAnswers(
       (key) =>
         new Promise<Config>((resolve) => {
-          if (key === 'sk-old') answerFirst = () => resolve({} as Config);
+          if (key === 'sk-old') answerOld = () => resolve({} as Config);
           else resolve({} as Config);
         })
     );
 
-    const overtaken = signIn(store, false, SERVER_A, 'sk-old');
-    await signIn(store, false, SERVER_A, 'sk-new');
-    answerFirst();
+    const overtaken = signIn(store, true, 'sk-old');
+    await signIn(store, true, 'sk-new');
+    expect(configRequests).toEqual(['sk-old', 'sk-new']);
+    answerOld();
 
     await expect(overtaken).rejects.toMatchObject({ name: 'LoginSupersededError' });
     expect(store.getState().managementKey).toBe('sk-new');
-    expect(obfuscatedSessionStorage.getItem<{ managementKey: string }>('cli-proxy-auth-session'))
-      .toMatchObject({ managementKey: 'sk-new' });
-  });
-
-  test('a key from before the auth store is not used after its owner logged out', async () => {
-    localStorage.setItem('managementKey', JSON.stringify('sk-legacy'));
-    localStorage.setItem('apiBase', JSON.stringify(SERVER_A));
-
-    const store = await reloadPage();
-    expect(await store.getState().restoreSession()).toEqual({ status: 'none' });
-    expect(localStorage.getItem('managementKey')).toBeNull();
-  });
-
-  test('a key from before the auth store still signs in a user who never logged out', async () => {
-    localStorage.setItem('managementKey', JSON.stringify('sk-legacy'));
-    localStorage.setItem('apiBase', JSON.stringify(SERVER_A));
-    localStorage.setItem('isLoggedIn', 'true');
-
-    const store = await reloadPage();
-    expect(await store.getState().restoreSession()).toEqual({ status: 'restored' });
-    expect(configRequests).toEqual(['sk-legacy']);
-    expect(localStorage.getItem('isLoggedIn')).toBeNull();
+    expect(savedState().managementKey).toBe('sk-new');
   });
 
   test('a saved sign-in this browser cannot read starts signed out, not with scrambled state', async () => {
     localStorage.setItem('cli-proxy-auth', legacyObfuscate(SAVED_AUTH, CHROME_142));
+    localStorage.setItem('isLoggedIn', 'true');
 
     const store = await reloadPage();
     const state = store.getState() as unknown as Record<string, unknown>;
