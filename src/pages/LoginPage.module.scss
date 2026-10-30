@@ -227,16 +227,19 @@
 .retryHint {
   color: var(--text-secondary);
   font-size: 12px;
+}
 
-  // Empty, it stays in the accessibility tree but out of the flex flow, so it adds no gap.
-  &:empty {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    overflow: hidden;
-    clip: rect(0 0 0 0);
-    white-space: nowrap;
-  }
+// Read by screen readers, never shown; out of the flex flow, so it adds no gap.
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 // ========== 启动动画（右侧） ==========

@@ -11,7 +11,7 @@ const ENC_PREFIX = 'enc::v2::';
 const LEGACY_ENC_PREFIX = 'enc::v1::';
 const SECRET_SALT = 'cli-proxy-api-webui::secure-storage';
 
-let cachedKeyBytes: Uint8Array | null = null;
+let cachedKey: { host: string; bytes: Uint8Array } | null = null;
 
 function encodeText(text: string): Uint8Array {
   const encoder = new TextEncoder();
@@ -24,16 +24,19 @@ function decodeText(bytes: Uint8Array): string {
 }
 
 function getKeyBytes(): Uint8Array {
-  if (cachedKeyBytes) return cachedKeyBytes;
-
+  let host: string;
   try {
-    cachedKeyBytes = encodeText(`${SECRET_SALT}|${window.location.host}`);
+    host = window.location.host;
   } catch (error) {
+    // Not cached: a key derived without a host must not outlive the moment it was needed.
     console.warn('Obfuscation fallback to simple key:', error);
-    cachedKeyBytes = encodeText(SECRET_SALT);
+    return encodeText(SECRET_SALT);
   }
 
-  return cachedKeyBytes;
+  if (cachedKey?.host !== host) {
+    cachedKey = { host, bytes: encodeText(`${SECRET_SALT}|${host}`) };
+  }
+  return cachedKey.bytes;
 }
 
 function getLegacyKeyBytes(): Uint8Array {

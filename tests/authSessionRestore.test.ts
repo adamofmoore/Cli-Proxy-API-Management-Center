@@ -175,6 +175,47 @@ describe('restoring a sign-in', () => {
     expect(store.getState().connectionStatus).toBe('disconnected');
   });
 
+  test('cancelling a restore drops its key from the client and its /config answer', async () => {
+    await signIn(await reloadPage(), true);
+    const store = await reloadPage();
+    useConfigStore.setState({ fetchConfig: originalFetchConfig, config: null });
+    const originalGetConfig = configApi.getConfig;
+    let answer: () => void = () => {};
+    configApi.getConfig = () => {
+      configRequests.push(sentKey());
+      return new Promise<Config>((resolve) => (answer = () => resolve({ debug: true } as Config)));
+    };
+    configRequests = [];
+    try {
+      const restoring = store.getState().restoreSession();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(configRequests).toEqual(['sk-a']);
+
+      store.getState().cancelRestore();
+      expect(sentKey()).toBe('');
+      answer();
+      await restoring;
+
+      expect(useConfigStore.getState().config).toBeNull();
+    } finally {
+      configApi.getConfig = originalGetConfig;
+    }
+  });
+
+  test('cancelling once the restore has signed in leaves that sign-in alone', async () => {
+    await signIn(await reloadPage(), true);
+    const store = await reloadPage();
+    // Cancel at the first moment the store reports signed in, before restoreSession settles.
+    const unsubscribe = store.subscribe((state) => {
+      if (state.isAuthenticated) store.getState().cancelRestore();
+    });
+
+    expect(await store.getState().restoreSession()).toEqual({ status: 'restored' });
+    unsubscribe();
+    expect(store.getState().isAuthenticated).toBe(true);
+    expect(sentKey()).toBe('sk-a');
+  });
+
   test('a sign-in overtaken by a newer one never commits its credentials', async () => {
     const store = await reloadPage();
     let answerOld: () => void = () => {};
@@ -244,6 +285,72 @@ describe('restoring a sign-in', () => {
       apiBase: '',
       rememberPassword: false,
     });
+  });
+
+  test.each([
+    ['a field name garbled', { serverBuilgDate: '2026-10-20T12:00:00Z' }],
+    ['a value of the wrong type', { rememberPassword: 'true' }],
+    ['a garbled address', { apiBase: 'hptp://server-a:8317' }],
+  ])(
+    'a save that parses but is garbled (%s, as an old save can read after a browser update) starts signed out',
+    async (_label, damage) => {
+      obfuscatedStorage.setItem('cli-proxy-auth', {
+        state: { apiBase: SERVER_A, managementKey: 'sk-a', rememberPassword: true, ...damage },
+        version: 0,
+      });
+      localStorage.setItem('isLoggedIn', 'true');
+
+      const store = await reloadPage();
+      expect(store.getState().managementKey).toBe('');
+      expect(await store.getState().restoreSession()).toEqual({ status: 'none' });
+      expect(configRequests).toEqual([]);
+    }
+  );
+
+  test('a save from an older release, with fewer fields, is still accepted', async () => {
+    obfuscatedStorage.setItem('cli-proxy-auth', {
+      state: {
+        apiBase: SERVER_A,
+        managementKey: 'sk-a',
+        serverVersion: null,
+        serverBuildDate: null,
+      },
+      version: 0,
+    });
+    localStorage.setItem('isLoggedIn', 'true');
+
+    const store = await reloadPage();
+    expect(await store.getState().restoreSession()).toEqual({ status: 'restored' });
+  });
+
+  test('a retry uses the key another tab signed in with since this page loaded', async () => {
+    await signIn(await reloadPage(), true, 'sk-a');
+    const thisTab = await reloadPage();
+    proxyRestarting();
+    await thisTab.getState().restoreSession();
+
+    proxyUp();
+    await signIn(await reloadPage(), true, 'sk-b');
+    configRequests = [];
+
+    expect(await thisTab.getState().restoreSession()).toEqual({ status: 'restored' });
+    expect(configRequests).toEqual(['sk-b']);
+  });
+
+  test('a retry does not sign back in after another tab logged out', async () => {
+    await signIn(await reloadPage(), true);
+    const thisTab = await reloadPage();
+    proxyRestarting();
+    await thisTab.getState().restoreSession();
+
+    const otherTab = await reloadPage();
+    await otherTab.getState().restoreSession();
+    otherTab.getState().logout();
+    proxyUp();
+    configRequests = [];
+
+    expect(await thisTab.getState().restoreSession()).toEqual({ status: 'none' });
+    expect(configRequests).toEqual([]);
   });
 
   test('a saved sign-in this browser cannot read starts signed out, not with scrambled state', async () => {

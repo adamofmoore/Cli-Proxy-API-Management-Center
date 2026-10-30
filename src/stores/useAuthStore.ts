@@ -35,6 +35,26 @@ let restoreSessionPromise: Promise<RestoreOutcome> | null = null;
 // commits its result.
 let loginGeneration = 0;
 
+// Every field any release has persisted, with its type. A browser update can garble an old
+// enc::v1 save into JSON that still parses; a renamed field or a wrong type is how that shows.
+const SAVED_AUTH_FIELDS: Record<string, (value: unknown) => boolean> = {
+  apiBase: (value) => typeof value === 'string' && (!value || /^https?:\/\//i.test(value)),
+  managementKey: (value) => typeof value === 'string',
+  rememberPassword: (value) => typeof value === 'boolean',
+  serverVersion: (value) => value === null || typeof value === 'string',
+  serverBuildDate: (value) => value === null || typeof value === 'string',
+};
+
+const isSavedAuth = (data: unknown): boolean => {
+  if (!data || typeof data !== 'object') return false;
+  const { state, version, ...rest } = data as Record<string, unknown>;
+  if (Object.keys(rest).length || typeof version !== 'number') return false;
+  if (!state || typeof state !== 'object') return false;
+  return Object.entries(state).every(
+    ([field, value]) => SAVED_AUTH_FIELDS[field]?.(value) === true
+  );
+};
+
 const supersededLogin = () => {
   const error = new Error('Sign-in was superseded by a newer attempt');
   error.name = 'LoginSupersededError';
@@ -61,6 +81,8 @@ export const useAuthStore = create<AuthStoreState>()(
 
         const attempt: Promise<RestoreOutcome> = (async (): Promise<RestoreOutcome> => {
           try {
+            // Another tab may have signed in with a new key, or logged out, since this page loaded.
+            await useAuthStore.persist.rehydrate();
             obfuscatedStorage.migratePlaintextKeys(['apiBase', 'apiUrl', 'managementKey']);
 
             // Logout (in any tab) clears this flag, so a key another tab still holds, or one an
@@ -109,7 +131,8 @@ export const useAuthStore = create<AuthStoreState>()(
       },
 
       cancelRestore: () => {
-        if (!restoreSessionPromise) return;
+        // Signed in already: the restore succeeded, and there is nothing left to cancel.
+        if (!restoreSessionPromise || get().isAuthenticated) return;
         restoreSessionPromise = null;
         loginGeneration += 1;
         useConfigStore.getState().clearCache();
@@ -207,8 +230,8 @@ export const useAuthStore = create<AuthStoreState>()(
       storage: createJSONStorage(() => ({
         getItem: (name) => {
           const data = obfuscatedStorage.getItem<unknown>(name);
-          // Anything but an object is a save this browser can no longer read: start signed out.
-          return data && typeof data === 'object' ? JSON.stringify(data) : null;
+          // A save this browser cannot read, or reads back garbled: start signed out.
+          return isSavedAuth(data) ? JSON.stringify(data) : null;
         },
         setItem: (name, value) => {
           obfuscatedStorage.setItem(name, JSON.parse(value));

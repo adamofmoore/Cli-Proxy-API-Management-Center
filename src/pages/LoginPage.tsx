@@ -374,13 +374,15 @@ export function LoginPage() {
               </Button>
 
               {error && <div className={styles.errorBox}>{error}</div>}
-              {/* Always mounted: screen readers announce a live region's changes, not its arrival. */}
-              <div className={styles.retryHint} role="status" aria-live="polite">
-                {retrying ? t('login.retrying_hint') : ''}
-              </div>
+              {retrying && <div className={styles.retryHint}>{t('login.retrying_hint')}</div>}
             </div>
           </div>
         )}
+        {/* Mounted before the splash gives way to the form: screen readers announce a live
+            region's changes, not its arrival with text already in it. */}
+        <div className={styles.srOnly} role="status" aria-live="polite">
+          {retrying ? t('login.retrying_hint') : ''}
+        </div>
       </div>
     </div>
   );
