@@ -470,6 +470,38 @@ describe('restoring a sign-in', () => {
     expect(savedState().managementKey).toBe('sk-b');
   });
 
+  test('a save that other tabs keep changing is retried, not treated as signed out', async () => {
+    await signIn(await reloadPage(), true, 'sk-a');
+    const thisTab = await reloadPage();
+    const held = new Map<string, () => void>();
+    proxyAnswers(
+      (key) =>
+        new Promise<Config>((resolve) => {
+          held.set(key, () => resolve({} as Config));
+        })
+    );
+    const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+    const otherTabSignsIn = async (key: string) => {
+      const otherTab = await reloadPage();
+      const signingIn = signIn(otherTab, true, key);
+      await tick();
+      held.get(key)?.();
+      await signingIn;
+    };
+
+    const restoring = thisTab.getState().restoreSession();
+    await tick();
+    await otherTabSignsIn('sk-b');
+    held.get('sk-a')?.();
+    await tick();
+    await otherTabSignsIn('sk-c');
+    held.get('sk-b')?.();
+
+    expect(await restoring).toMatchObject({ status: 'failed', retryable: true });
+    expect(thisTab.getState().isAuthenticated).toBe(false);
+    expect(localStorage.getItem('isLoggedIn')).toBe('true');
+  });
+
   test('a saved sign-in this browser cannot read starts signed out, not with scrambled state', async () => {
     localStorage.setItem('cli-proxy-auth', legacyObfuscate(SAVED_AUTH, CHROME_142));
     localStorage.setItem('isLoggedIn', 'true');

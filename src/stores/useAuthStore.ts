@@ -23,7 +23,7 @@ interface AuthStoreState extends AuthState {
   login: (credentials: LoginCredentials, stillWanted?: () => boolean) => Promise<void>;
   logout: () => void;
   restoreSession: () => Promise<RestoreOutcome>;
-  /** Makes a restore in flight fail as superseded instead of signing in. */
+  /** Makes a restore in flight report `none` instead of signing in. */
   cancelRestore: () => void;
   /** Logs out and forgets the server address and remember-password choice as well. */
   clearLoginData: () => void;
@@ -91,7 +91,12 @@ const dropConnection = () => {
   loginGeneration += 1;
   useConfigStore.getState().clearCache();
   apiClient.disconnect();
-  useAuthStore.setState({ connectionStatus: 'disconnected' });
+  useAuthStore.setState({
+    connectionStatus: 'disconnected',
+    serverVersion: null,
+    serverBuildDate: null,
+    supportsPlugin: false,
+  });
 };
 
 export const useAuthStore = create<AuthStoreState>()(
@@ -167,8 +172,14 @@ export const useAuthStore = create<AuthStoreState>()(
               }
             }
           } catch (error) {
-            // Cancelled, logged out, or overtaken: there is no sign-in left to report on.
-            if (isSuperseded(error)) return { status: 'none' };
+            if (isSuperseded(error)) {
+              // Still saved as signed in: other tabs kept changing it, so let the retry try again.
+              const stillSignedIn =
+                restoreSessionPromise === attempt && localStorage.getItem('isLoggedIn') === 'true';
+              // Otherwise cancelled, logged out, or overtaken: no sign-in is left to report on.
+              if (!stillSignedIn) return { status: 'none' };
+              return { status: 'failed', retryable: true, error };
+            }
             console.warn('Auto login failed:', error);
             return { status: 'failed', retryable: isRetryableConnectionError(error), error };
           }
@@ -289,7 +300,8 @@ export const useAuthStore = create<AuthStoreState>()(
         },
         setItem: (name, value) => {
           // A page that is not signed in holds only what it last read, and another tab may have
-          // saved since: only a sign-in, a logout and a clear write the save every tab shares.
+          // saved since: it writes the save every tab shares only to log out or clear it.
+          // A signed-in page writes on every change, as before.
           if (!useAuthStore.getState().isAuthenticated && !savingSignedOut) return;
           obfuscatedStorage.setItem(name, JSON.parse(value));
         },
