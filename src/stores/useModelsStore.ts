@@ -25,6 +25,8 @@ interface ModelsState {
   isCacheValid: (apiBase: string, apiKey?: string) => boolean;
 }
 
+let modelsRequestToken = 0;
+
 export const useModelsStore = create<ModelsState>((set, get) => ({
   models: [],
   loading: false,
@@ -41,10 +43,17 @@ export const useModelsStore = create<ModelsState>((set, get) => ({
       return cache.data;
     }
 
+    const requestId = (modelsRequestToken += 1);
     set({ loading: true, error: null });
 
     try {
       const list = await modelsApi.fetchModels(apiBase, apiKeyScope || undefined);
+
+      // 请求期间连接已切换/登出或已有更新的请求，忽略旧结果，避免覆盖当前会话的状态
+      if (requestId !== modelsRequestToken) {
+        return list;
+      }
+
       const now = Date.now();
 
       set({
@@ -55,6 +64,10 @@ export const useModelsStore = create<ModelsState>((set, get) => ({
 
       return list;
     } catch (error: unknown) {
+      if (requestId !== modelsRequestToken) {
+        throw error;
+      }
+
       const message =
         error instanceof Error
           ? error.message
@@ -71,7 +84,9 @@ export const useModelsStore = create<ModelsState>((set, get) => ({
   },
 
   clearCache: () => {
-    set({ cache: null, models: [] });
+    // 让 in-flight 的旧请求失效；它们不会再提交，因此由这里结束 loading
+    modelsRequestToken += 1;
+    set({ cache: null, models: [], loading: false, error: null });
   },
 
   isCacheValid: (apiBase, apiKey) => {
