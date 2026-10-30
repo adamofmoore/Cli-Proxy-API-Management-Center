@@ -143,7 +143,6 @@ export function LoginPage() {
 
   useEffect(() => {
     if (!autoLoading) return;
-    let prefilled = false;
     let redirectTimer: number | null = null;
 
     const retry = createRestoreRetry({
@@ -164,13 +163,12 @@ export function LoginPage() {
           return;
         }
 
-        if (!prefilled) {
-          prefilled = true;
-          const stored = useAuthStore.getState();
-          setApiBase(stored.apiBase || detectedBase);
-          setManagementKey(stored.managementKey || '');
-          setRememberPassword(stored.rememberPassword);
-        }
+        // Each attempt reads the save again, and another tab may have changed it. No edit can be
+        // lost: editing the form stops restoring, and with it these updates.
+        const stored = useAuthStore.getState();
+        setApiBase(stored.apiBase || detectedBase);
+        setManagementKey(stored.managementKey || '');
+        setRememberPassword(stored.rememberPassword);
         setError(outcome.status === 'failed' ? getLocalizedErrorMessage(outcome.error, t) : '');
       },
     });
@@ -373,15 +371,25 @@ export function LoginPage() {
                 {loading ? t('login.submitting') : t('login.submit_button')}
               </Button>
 
-              {error && <div className={styles.errorBox}>{error}</div>}
-              {retrying && <div className={styles.retryHint}>{t('login.retrying_hint')}</div>}
+              {/* Screen readers get both from the live region below, so these stay out of its way. */}
+              {error && (
+                <div className={styles.errorBox} aria-hidden="true">
+                  {error}
+                </div>
+              )}
+              {retrying && (
+                <div className={styles.retryHint} aria-hidden="true">
+                  {t('login.retrying_hint')}
+                </div>
+              )}
             </div>
           </div>
         )}
         {/* Mounted before the splash gives way to the form: screen readers announce a live
             region's changes, not its arrival with text already in it. */}
-        <div className={styles.srOnly} role="status" aria-live="polite">
-          {retrying ? t('login.retrying_hint') : ''}
+        {/* Read whole on every change, so the error alone, once the hint goes, says it gave up. */}
+        <div className={styles.srOnly} role="status" aria-live="polite" aria-atomic="true">
+          {[error, retrying ? t('login.retrying_hint') : ''].filter(Boolean).join(' ')}
         </div>
       </div>
     </div>

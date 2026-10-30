@@ -1,4 +1,5 @@
 @use '../styles/variables.scss' as *;
+@use '../styles/mixins.scss' as *;
 
 // 主容器 - 左右分栏布局
 .container {
@@ -229,17 +230,8 @@
   font-size: 12px;
 }
 
-// Read by screen readers, never shown; out of the flex flow, so it adds no gap.
 .srOnly {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  padding: 0;
-  margin: -1px;
-  overflow: hidden;
-  clip: rect(0, 0, 0, 0);
-  white-space: nowrap;
-  border: 0;
+  @include visually-hidden;
 }
 
 // ========== 启动动画（右侧） ==========

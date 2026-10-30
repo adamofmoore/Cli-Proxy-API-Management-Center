@@ -33,7 +33,7 @@ function getKeyBytes(): Uint8Array {
     return encodeText(SECRET_SALT);
   }
 
-  if (cachedKey?.host !== host) {
+  if (!cachedKey || cachedKey.host !== host) {
     cachedKey = { host, bytes: encodeText(`${SECRET_SALT}|${host}`) };
   }
   return cachedKey.bytes;
