@@ -54,14 +54,18 @@ export const SAVED_AUTH = JSON.stringify({
 
 const g = globalThis as unknown as Record<string, unknown>;
 const INSTALLED_GLOBALS = ['localStorage', 'window'] as const;
-let saved: { globals: Map<string, PropertyDescriptor | undefined>; userAgent?: PropertyDescriptor } | null =
-  null;
+let saved: {
+  globals: Map<string, PropertyDescriptor | undefined>;
+  userAgent?: PropertyDescriptor;
+} | null = null;
 
 /** Installs the browser globals the auth stores read, with empty storage. Undo with `uninstallBrowserEnv`. */
 export function installBrowserEnv(userAgent = CHROME_141) {
   if (!saved) {
     saved = {
-      globals: new Map(INSTALLED_GLOBALS.map((name) => [name, Object.getOwnPropertyDescriptor(g, name)])),
+      globals: new Map(
+        INSTALLED_GLOBALS.map((name) => [name, Object.getOwnPropertyDescriptor(g, name)])
+      ),
       userAgent: Object.getOwnPropertyDescriptor(globalThis.navigator, 'userAgent'),
     };
   }

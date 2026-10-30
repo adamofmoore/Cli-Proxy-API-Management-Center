@@ -29,15 +29,14 @@ describe('saved login survives browser updates', () => {
 
   test('a value saved by an earlier release is still read, then rewritten so updates cannot break it', async () => {
     const { obfuscatedStorage } = await import('../src/services/storage/secureStorage');
-    localStorage.setItem(
-      'cli-proxy-auth',
-      legacyObfuscate(SAVED_AUTH, CHROME_141)
-    );
+    localStorage.setItem('cli-proxy-auth', legacyObfuscate(SAVED_AUTH, CHROME_141));
 
     expect(obfuscatedStorage.getItem('cli-proxy-auth')).toEqual(JSON.parse(SAVED_AUTH));
 
     setUserAgent(CHROME_142);
     const after = await loadEncryption();
-    expect(after.deobfuscateData(localStorage.getItem('cli-proxy-auth') as string)).toBe(SAVED_AUTH);
+    expect(after.deobfuscateData(localStorage.getItem('cli-proxy-auth') as string)).toBe(
+      SAVED_AUTH
+    );
   });
 });

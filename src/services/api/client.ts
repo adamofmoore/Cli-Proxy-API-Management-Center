@@ -57,6 +57,15 @@ class ApiClient {
     }
   }
 
+  /**
+   * Drops the key and ends the current connection, so answers to requests already sent
+   * neither sign out nor relabel whatever session comes next.
+   */
+  disconnect(): void {
+    this.managementKey = '';
+    this.connection += 1;
+  }
+
   private readHeader(headers: Record<string, unknown> | undefined, keys: string[]): string | null {
     if (!headers) return null;
 

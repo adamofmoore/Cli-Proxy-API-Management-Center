@@ -57,9 +57,39 @@ describe('responses from an earlier connection', () => {
     expect(unauthorized.length).toBe(0);
   });
 
+  test("the current server's version and plugin support are announced", async () => {
+    const versions = recordEvents('server-version-update');
+    const plugins = recordEvents('server-plugin-support-update');
+    const held = heldResponse(200, { 'x-cpa-version': 'v8.0.23', 'x-cpa-support-plugin': 'true' });
+    const request = apiClient.get('/config', { adapter: held.adapter });
+    await held.sent;
+
+    held.release();
+    await request;
+    expect(versions.length).toBe(1);
+    expect(plugins.length).toBe(1);
+  });
+
+  test('a late 401 after logging out does not fire another sign-out', async () => {
+    const unauthorized = recordEvents('unauthorized');
+    const held = heldResponse(401);
+    const request = apiClient.get('/config', { adapter: held.adapter });
+    await held.sent;
+
+    apiClient.disconnect();
+    held.release();
+
+    await expect(request).rejects.toMatchObject({ status: 401 });
+    expect(unauthorized.length).toBe(0);
+  });
+
   test("a late answer from the previous server does not relabel the new server's version", async () => {
     const versions = recordEvents('server-version-update');
-    const held = heldResponse(200, { 'x-cpa-version': 'v1.0.0-old' });
+    const plugins = recordEvents('server-plugin-support-update');
+    const held = heldResponse(200, {
+      'x-cpa-version': 'v1.0.0-old',
+      'x-cpa-support-plugin': 'true',
+    });
     const request = apiClient.get('/config', { adapter: held.adapter });
     await held.sent;
 
@@ -68,5 +98,6 @@ describe('responses from an earlier connection', () => {
 
     await request;
     expect(versions.length).toBe(0);
+    expect(plugins.length).toBe(0);
   });
 });

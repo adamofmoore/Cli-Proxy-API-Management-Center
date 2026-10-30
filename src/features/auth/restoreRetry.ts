@@ -3,7 +3,8 @@ import type { RestoreOutcome } from '@/types';
 export const RETRY_BASE_DELAY_MS = 2000;
 export const RETRY_MAX_DELAY_MS = 15000;
 // Long enough to outlast a proxy restart or rebuild; past it the server is likely just wrong.
-// No attempt starts later than this after the first.
+// No retry starts later than this after the login page began restoring, even if a sleeping
+// device or a background tab delays its timer.
 export const RETRY_WINDOW_MS = 5 * 60 * 1000;
 
 export type RestoreUpdate = { outcome: RestoreOutcome; retrying: boolean };
@@ -66,18 +67,32 @@ export function createRestoreRetry({
   let timer: unknown = null;
   let inFlight = false;
 
+  const teardown = () => {
+    generation += 1;
+    if (timer !== null) {
+      clearTimer(timer);
+      timer = null;
+    }
+    if (inFlight) {
+      inFlight = false;
+      cancel();
+    }
+  };
+
+  const withinWindow = (at: number) => at - startedAt <= RETRY_WINDOW_MS;
+
   const settle = (current: number, outcome: RestoreOutcome) => {
     if (current !== generation) return;
     const delay = retryDelayMs(failures + 1);
     const retrying =
-      outcome.status === 'failed' &&
-      outcome.retryable &&
-      now() + delay - startedAt <= RETRY_WINDOW_MS;
+      outcome.status === 'failed' && outcome.retryable && withinWindow(now() + delay);
     if (retrying) {
       failures += 1;
       timer = setTimer(() => {
         timer = null;
-        attempt(current);
+        if (current !== generation) return;
+        if (withinWindow(now())) attempt(current);
+        else onUpdate({ outcome, retrying: false });
       }, delay);
     }
     onUpdate({ outcome, retrying });
@@ -94,7 +109,7 @@ export function createRestoreRetry({
   return {
     /** Starts restoring; with a failure handed over from a redirect, waits before retrying it. */
     start(handedOver?: RestoreFailureHandoff | null) {
-      generation += 1;
+      teardown();
       failures = 0;
       startedAt = now();
       if (handedOver) {
@@ -103,16 +118,6 @@ export function createRestoreRetry({
         attempt(generation);
       }
     },
-    stop() {
-      generation += 1;
-      if (timer !== null) {
-        clearTimer(timer);
-        timer = null;
-      }
-      if (inFlight) {
-        inFlight = false;
-        cancel();
-      }
-    },
+    stop: teardown,
   };
 }

@@ -3,6 +3,7 @@ import {
   createRestoreRetry,
   retryDelayMs,
   RETRY_WINDOW_MS,
+  toRestoreFailureHandoff,
   type RestoreUpdate,
 } from '../src/features/auth/restoreRetry';
 import type { RestoreOutcome } from '../src/types';
@@ -110,6 +111,57 @@ describe('restoring with retries', () => {
     // The next 15s retry would have started past the window.
     expect(Math.max(...startedAt) + 15000).toBeGreaterThan(RETRY_WINDOW_MS);
     expect(h.attempts()).toBe(startedAt.length);
+  });
+
+  test.each([
+    ['exactly at the end of the window', RETRY_WINDOW_MS, 2],
+    ['1ms past the window', RETRY_WINDOW_MS + 1, 1],
+  ])(
+    'a retry whose timer fires late (sleeping device) runs only within the window: %s',
+    async (_label, firesAt, attempts) => {
+      const h = harness([unreachable]);
+      h.retry.start();
+      await h.flush();
+      expect(h.pendingDelays()).toEqual([2000]);
+
+      await h.advance(firesAt);
+
+      expect(h.attempts()).toBe(attempts);
+      expect(h.pendingDelays()).toEqual([]);
+      expect(h.updates.at(-1)?.retrying).toBe(false);
+    }
+  );
+
+  test('starting again cancels the previous run, including its attempt in flight', async () => {
+    const h = harness([unreachable, rejected]);
+    h.holdNextAnswer();
+    h.retry.start();
+
+    h.retry.start();
+    expect(h.cancels()).toBe(1);
+    h.releaseHeldAnswer();
+    await h.flush();
+    await h.advance(60_000);
+
+    expect(h.attempts()).toBe(2);
+    expect(h.updates).toEqual([{ outcome: rejected, retrying: false }]);
+  });
+
+  test('a failure handed over across a redirect keeps only plain, cloneable fields', () => {
+    const error = Object.assign(new Error('invalid management key'), {
+      status: 401,
+      code: 'ERR_BAD_REQUEST',
+      details: { nested: true },
+    });
+
+    const handoff = toRestoreFailureHandoff({ status: 'failed', retryable: false, error });
+
+    expect(handoff).toEqual({
+      retryable: false,
+      error: { status: 401, code: 'ERR_BAD_REQUEST', message: 'invalid management key' },
+    });
+    expect(structuredClone(handoff)).toEqual(handoff);
+    expect(toRestoreFailureHandoff({ status: 'none' })).toBeNull();
   });
 
   test('does not retry a rejected key', async () => {

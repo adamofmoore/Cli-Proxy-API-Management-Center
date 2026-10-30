@@ -3,6 +3,7 @@ import type { Config } from '../src/types';
 import { useConfigStore } from '../src/stores/useConfigStore';
 import { apiClient } from '../src/services/api/client';
 import { obfuscatedStorage } from '../src/services/storage/secureStorage';
+import { configApi } from '../src/services/api/config';
 import {
   CHROME_141,
   CHROME_142,
@@ -171,6 +172,7 @@ describe('restoring a sign-in', () => {
 
     expect(await restoring).toMatchObject({ status: 'failed', retryable: false });
     expect(store.getState().isAuthenticated).toBe(false);
+    expect(store.getState().connectionStatus).toBe('disconnected');
   });
 
   test('a sign-in overtaken by a newer one never commits its credentials', async () => {
@@ -192,6 +194,56 @@ describe('restoring a sign-in', () => {
     await expect(overtaken).rejects.toMatchObject({ name: 'LoginSupersededError' });
     expect(store.getState().managementKey).toBe('sk-new');
     expect(savedState().managementKey).toBe('sk-new');
+  });
+
+  test("a second sign-in sends its own /config request instead of joining the first one's", async () => {
+    // The real fetchConfig, which merges concurrent requests; only the network call is faked.
+    useConfigStore.setState({ fetchConfig: originalFetchConfig });
+    const originalGetConfig = configApi.getConfig;
+    const answers = new Map<string, () => void>();
+    configApi.getConfig = () => {
+      const key = sentKey();
+      configRequests.push(key);
+      return new Promise<Config>((resolve) =>
+        answers.set(key, () => resolve({ debug: key === 'sk-new' } as Config))
+      );
+    };
+    try {
+      const store = await reloadPage();
+      const overtaken = signIn(store, true, 'sk-old');
+      const current = signIn(store, true, 'sk-new');
+
+      expect(configRequests).toEqual(['sk-old', 'sk-new']);
+      answers.get('sk-new')?.();
+      await current;
+      answers.get('sk-old')?.();
+      await expect(overtaken).rejects.toMatchObject({ name: 'LoginSupersededError' });
+      expect(useConfigStore.getState().config).toMatchObject({ debug: true });
+    } finally {
+      configApi.getConfig = originalGetConfig;
+    }
+  });
+
+  test('logging out drops the key from the API client, not only from the store', async () => {
+    const store = await reloadPage();
+    await signIn(store, true);
+
+    store.getState().logout();
+    expect(sentKey()).toBe('');
+  });
+
+  test('clearing login data forgets the server address and the remember choice too', async () => {
+    const store = await reloadPage();
+    await signIn(store, true);
+
+    store.getState().clearLoginData();
+
+    expect(store.getState()).toMatchObject({
+      isAuthenticated: false,
+      managementKey: '',
+      apiBase: '',
+      rememberPassword: false,
+    });
   });
 
   test('a saved sign-in this browser cannot read starts signed out, not with scrambled state', async () => {

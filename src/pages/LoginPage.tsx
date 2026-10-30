@@ -157,7 +157,10 @@ export function LoginPage() {
         if (outcome.status === 'restored') {
           setAutoLoginSuccess(true);
           // 延迟跳转，让用户看到成功动画
-          redirectTimer = window.setTimeout(() => navigate(redirectTarget, { replace: true }), 1500);
+          redirectTimer = window.setTimeout(
+            () => navigate(redirectTarget, { replace: true }),
+            1500
+          );
           return;
         }
 
@@ -168,9 +171,7 @@ export function LoginPage() {
           setManagementKey(stored.managementKey || '');
           setRememberPassword(stored.rememberPassword);
         }
-        if (outcome.status === 'failed') {
-          setError(getLocalizedErrorMessage(outcome.error, t));
-        }
+        setError(outcome.status === 'failed' ? getLocalizedErrorMessage(outcome.error, t) : '');
       },
     });
     restorer.current = retry;
@@ -373,11 +374,10 @@ export function LoginPage() {
               </Button>
 
               {error && <div className={styles.errorBox}>{error}</div>}
-              {retrying && (
-                <div className={styles.retryHint} role="status" aria-live="polite">
-                  {t('login.retrying_hint')}
-                </div>
-              )}
+              {/* Always mounted: screen readers announce a live region's changes, not its arrival. */}
+              <div className={styles.retryHint} role="status" aria-live="polite">
+                {retrying ? t('login.retrying_hint') : ''}
+              </div>
             </div>
           </div>
         )}

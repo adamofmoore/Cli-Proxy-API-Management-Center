@@ -162,9 +162,7 @@ export function SystemPage() {
       variant: 'danger',
       confirmText: t('common.confirm'),
       onConfirm: () => {
-        auth.logout();
-        // Logout keeps the server address for the login form; clearing login data forgets it too.
-        useAuthStore.setState({ apiBase: '' });
+        auth.clearLoginData();
         if (typeof localStorage === 'undefined') return;
         const keysToRemove = [STORAGE_KEY_AUTH, 'isLoggedIn', 'apiBase', 'apiUrl', 'managementKey'];
         keysToRemove.forEach((key) => localStorage.removeItem(key));

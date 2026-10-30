@@ -5,12 +5,7 @@
 
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
-import type {
-  AuthState,
-  LoginCredentials,
-  ConnectionStatus,
-  RestoreOutcome,
-} from '@/types';
+import type { AuthState, LoginCredentials, ConnectionStatus, RestoreOutcome } from '@/types';
 import { STORAGE_KEY_AUTH } from '@/utils/constants';
 import { obfuscatedStorage } from '@/services/storage/secureStorage';
 import { apiClient } from '@/services/api/client';
@@ -29,12 +24,15 @@ interface AuthStoreState extends AuthState {
   restoreSession: () => Promise<RestoreOutcome>;
   /** Makes a restore in flight fail as superseded instead of signing in. */
   cancelRestore: () => void;
+  /** Logs out and forgets the server address and remember-password choice as well. */
+  clearLoginData: () => void;
   updateServerVersion: (version: string | null, buildDate?: string | null) => void;
   updateServerPluginSupport: (supportsPlugin: boolean) => void;
 }
 
 let restoreSessionPromise: Promise<RestoreOutcome> | null = null;
-// Bumped by every login and logout, so an attempt that was overtaken never commits its result.
+// Bumped by every login, logout and cancelled restore, so an attempt that was overtaken never
+// commits its result.
 let loginGeneration = 0;
 
 const supersededLogin = () => {
@@ -114,6 +112,14 @@ export const useAuthStore = create<AuthStoreState>()(
         if (!restoreSessionPromise) return;
         restoreSessionPromise = null;
         loginGeneration += 1;
+        useConfigStore.getState().clearCache();
+        apiClient.disconnect();
+        set({ connectionStatus: 'disconnected' });
+      },
+
+      clearLoginData: () => {
+        get().logout();
+        set({ apiBase: '', rememberPassword: false });
       },
 
       // 登录
@@ -168,6 +174,7 @@ export const useAuthStore = create<AuthStoreState>()(
       logout: () => {
         restoreSessionPromise = null;
         loginGeneration += 1;
+        apiClient.disconnect();
         useConfigStore.getState().clearCache();
         useModelsStore.getState().clearCache();
         useQuotaStore.getState().clearQuotaCache();
