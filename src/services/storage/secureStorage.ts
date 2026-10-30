@@ -5,7 +5,12 @@
  * IMPORTANT: 这不是安全边界，仅用于避免“肉眼直读”的轻度混淆。
  */
 
-import { obfuscateData, deobfuscateData, isObfuscated } from '@/utils/encryption';
+import {
+  obfuscateData,
+  deobfuscateData,
+  isLegacyObfuscated,
+  isObfuscated,
+} from '@/utils/encryption';
 
 interface StorageOptions {
   /**
@@ -45,7 +50,9 @@ class ObfuscatedStorageService {
 
     try {
       const decrypted = obfuscate ? deobfuscateData(raw) : raw;
-      return JSON.parse(decrypted) as T;
+      const value = JSON.parse(decrypted) as T;
+      if (obfuscate && isLegacyObfuscated(raw)) this.migrateLegacyValue(key, value, options);
+      return value;
     } catch {
       // JSON解析失败,尝试兼容旧的纯字符串数据 (非JSON格式)
       try {
@@ -61,6 +68,18 @@ class ObfuscatedStorageService {
         // 完全失败,静默返回null (避免控制台污染)
         return null;
       }
+    }
+  }
+
+  /**
+   * Rewrites a v1 value in the browser-version-independent format while this browser can
+   * still read it. The value was read either way, so a failed write only postpones this.
+   */
+  private migrateLegacyValue(key: string, value: unknown, options: StorageOptions): void {
+    try {
+      this.setItem(key, value, options);
+    } catch (error) {
+      console.warn(`Failed to migrate key "${key}":`, error);
     }
   }
 

@@ -162,7 +162,7 @@ export function SystemPage() {
       variant: 'danger',
       confirmText: t('common.confirm'),
       onConfirm: () => {
-        auth.logout();
+        auth.clearLoginData();
         if (typeof localStorage === 'undefined') return;
         const keysToRemove = [STORAGE_KEY_AUTH, 'isLoggedIn', 'apiBase', 'apiUrl', 'managementKey'];
         keysToRemove.forEach((key) => localStorage.removeItem(key));

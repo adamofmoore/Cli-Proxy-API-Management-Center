@@ -16,10 +16,20 @@ import {
 import { computeApiUrl } from '@/utils/connection';
 import { parseApiErrorResponse } from './apiError';
 
+declare module 'axios' {
+  interface InternalAxiosRequestConfig {
+    /** The connection a request was sent on; see `ApiClient.connection`. */
+    connection?: number;
+  }
+}
+
 class ApiClient {
   private instance: AxiosInstance;
   private apiBase: string = '';
   private managementKey: string = '';
+  // Bumped whenever the address or key changes. A response to a request sent on an older
+  // connection must not sign out, or relabel, the session that replaced it.
+  private connection = 0;
 
   constructor() {
     this.instance = axios.create({
@@ -38,12 +48,22 @@ class ApiClient {
   setConfig(config: ApiClientConfig): void {
     this.apiBase = computeApiUrl(config.apiBase);
     this.managementKey = config.managementKey;
+    this.connection += 1;
 
     if (config.timeout) {
       this.instance.defaults.timeout = config.timeout;
     } else {
       this.instance.defaults.timeout = REQUEST_TIMEOUT_MS;
     }
+  }
+
+  /**
+   * Drops the key and ends the current connection, so answers to requests already sent
+   * neither sign out nor relabel whatever session comes next.
+   */
+  disconnect(): void {
+    this.managementKey = '';
+    this.connection += 1;
   }
 
   private readHeader(headers: Record<string, unknown> | undefined, keys: string[]): string | null {
@@ -106,6 +126,7 @@ class ApiClient {
       (config) => {
         // 设置 baseURL
         config.baseURL = this.apiBase;
+        config.connection = this.connection;
 
         // 添加认证头
         if (this.managementKey) {
@@ -120,6 +141,7 @@ class ApiClient {
     // 响应拦截器
     this.instance.interceptors.response.use(
       (response) => {
+        if (response.config.connection !== this.connection) return response;
         const headers = response.headers as Record<string, string | undefined>;
         const cpaVersion = this.readHeader(headers, CPA_VERSION_HEADER_KEYS);
         const cpaBuildDate = this.readHeader(headers, CPA_BUILD_DATE_HEADER_KEYS);
@@ -165,7 +187,7 @@ class ApiClient {
       apiError.data = responseData;
 
       // 401 未授权 - 触发登出事件
-      if (error.response?.status === 401) {
+      if (error.response?.status === 401 && error.config?.connection === this.connection) {
         window.dispatchEvent(new Event('unauthorized'));
       }
 

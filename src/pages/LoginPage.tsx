@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState, useCallback } from 'react';
+import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import { Navigate, useNavigate, useLocation } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/Button';
@@ -12,13 +12,17 @@ import { LANGUAGE_LABEL_KEYS, LANGUAGE_ORDER } from '@/utils/constants';
 import { isSupportedLanguage } from '@/utils/language';
 import { INLINE_LOGO_JPEG } from '@/assets/logoInline';
 import type { ApiError } from '@/types';
+import { createRestoreRetry, type RestoreFailureHandoff } from '@/features/auth/restoreRetry';
 import styles from './LoginPage.module.scss';
+
+type RedirectState = {
+  from?: { pathname?: string; search?: string; hash?: string };
+  restoreFailure?: RestoreFailureHandoff | null;
+};
 
 /**
  * 将 API 错误转换为本地化的用户友好消息
  */
-type RedirectState = { from?: { pathname?: string } };
-
 function getLocalizedErrorMessage(error: unknown, t: (key: string) => string): string {
   const apiError = error as Partial<ApiError>;
   const status = typeof apiError.status === 'number' ? apiError.status : undefined;
@@ -91,9 +95,7 @@ export function LoginPage() {
   const isAuthenticated = useAuthStore((state) => state.isAuthenticated);
   const login = useAuthStore((state) => state.login);
   const restoreSession = useAuthStore((state) => state.restoreSession);
-  const storedBase = useAuthStore((state) => state.apiBase);
-  const storedKey = useAuthStore((state) => state.managementKey);
-  const storedRememberPassword = useAuthStore((state) => state.rememberPassword);
+  const cancelRestore = useAuthStore((state) => state.cancelRestore);
 
   const [apiBase, setApiBase] = useState('');
   const [managementKey, setManagementKey] = useState('');
@@ -101,9 +103,24 @@ export function LoginPage() {
   const [showKey, setShowKey] = useState(false);
   const [rememberPassword, setRememberPassword] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [autoLoading, setAutoLoading] = useState(true);
+  // Already signed in (e.g. navigated here by hand): nothing to restore, just go back.
+  const [autoLoading, setAutoLoading] = useState(() => !useAuthStore.getState().isAuthenticated);
   const [autoLoginSuccess, setAutoLoginSuccess] = useState(false);
+  const [retrying, setRetrying] = useState(false);
   const [error, setError] = useState('');
+  const restorer = useRef<ReturnType<typeof createRestoreRetry> | null>(null);
+
+  const redirectState = location.state as RedirectState | null;
+  const fromState = redirectState?.from;
+  const redirectTarget = fromState?.pathname
+    ? `${fromState.pathname}${fromState.search ?? ''}${fromState.hash ?? ''}`
+    : '/';
+
+  // Any edit to the form is the user taking over: automatic restoring stops for good.
+  const stopRestoring = useCallback(() => {
+    setRetrying(false);
+    restorer.current?.stop();
+  }, []);
 
   const detectedBase = useMemo(() => detectApiBaseFromLocation(), []);
   const languageOptions = useMemo(
@@ -125,28 +142,47 @@ export function LoginPage() {
   );
 
   useEffect(() => {
-    const init = async () => {
-      try {
-        const autoLoggedIn = await restoreSession();
-        if (autoLoggedIn) {
-          setAutoLoginSuccess(true);
-          // 延迟跳转，让用户看到成功动画
-          setTimeout(() => {
-            const redirect = (location.state as RedirectState | null)?.from?.pathname || '/';
-            navigate(redirect, { replace: true });
-          }, 1500);
-        } else {
-          setApiBase(storedBase || detectedBase);
-          setManagementKey(storedKey || '');
-          setRememberPassword(storedRememberPassword || Boolean(storedKey));
-        }
-      } finally {
+    if (!autoLoading) return;
+    let redirectTimer: number | null = null;
+
+    const retry = createRestoreRetry({
+      restore: restoreSession,
+      cancel: cancelRestore,
+      onUpdate: ({ outcome, retrying: willRetry }) => {
         // 自动登录成功时 showSplash 仍由 autoLoginSuccess 维持，可无条件结束 loading
         setAutoLoading(false);
-      }
-    };
+        setRetrying(willRetry);
 
-    init();
+        if (outcome.status === 'restored') {
+          setAutoLoginSuccess(true);
+          // 延迟跳转，让用户看到成功动画
+          redirectTimer = window.setTimeout(
+            () => navigate(redirectTarget, { replace: true }),
+            1500
+          );
+          return;
+        }
+
+        // Each attempt reads the save again, and another tab may have changed it. No edit can be
+        // lost: editing the form stops restoring, and with it these updates.
+        const stored = useAuthStore.getState();
+        setApiBase(stored.apiBase || detectedBase);
+        setManagementKey(stored.managementKey || '');
+        setRememberPassword(stored.rememberPassword);
+        setError(outcome.status === 'failed' ? getLocalizedErrorMessage(outcome.error, t) : '');
+      },
+    });
+    restorer.current = retry;
+    retry.start(redirectState?.restoreFailure);
+    if (redirectState?.restoreFailure) {
+      // History state survives a reload: consume the handed-over failure so a reload retries.
+      navigate(location.pathname, { replace: true, state: { from: fromState } });
+    }
+
+    return () => {
+      retry.stop();
+      if (redirectTimer !== null) window.clearTimeout(redirectTimer);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -159,6 +195,8 @@ export function LoginPage() {
     const baseToUse = apiBase ? normalizeApiBase(apiBase) : detectedBase;
     setLoading(true);
     setError('');
+    // The automatic attempt this replaces is cancelled, and its late answers are ignored.
+    stopRestoring();
     try {
       await login({
         apiBase: baseToUse,
@@ -166,7 +204,7 @@ export function LoginPage() {
         rememberPassword,
       });
       showNotification(t('common.connected_status'), 'success');
-      navigate('/', { replace: true });
+      navigate(redirectTarget, { replace: true });
     } catch (err: unknown) {
       const message = getLocalizedErrorMessage(err, t);
       setError(message);
@@ -180,8 +218,10 @@ export function LoginPage() {
     login,
     managementKey,
     navigate,
+    redirectTarget,
     rememberPassword,
     showNotification,
+    stopRestoring,
     t,
   ]);
 
@@ -196,8 +236,7 @@ export function LoginPage() {
   );
 
   if (isAuthenticated && !autoLoading && !autoLoginSuccess) {
-    const redirect = (location.state as RedirectState | null)?.from?.pathname || '/';
-    return <Navigate to={redirect} replace />;
+    return <Navigate to={redirectTarget} replace />;
   }
 
   // 显示启动动画（自动登录中或自动登录成功）
@@ -258,7 +297,10 @@ export function LoginPage() {
               <div className={styles.toggleAdvanced}>
                 <SelectionCheckbox
                   checked={showCustomBase}
-                  onChange={setShowCustomBase}
+                  onChange={(checked) => {
+                    stopRestoring();
+                    setShowCustomBase(checked);
+                  }}
                   ariaLabel={t('login.custom_connection_label')}
                   label={t('login.custom_connection_label')}
                   labelClassName={styles.toggleLabel}
@@ -270,7 +312,10 @@ export function LoginPage() {
                   label={t('login.custom_connection_label')}
                   placeholder={t('login.custom_connection_placeholder')}
                   value={apiBase}
-                  onChange={(e) => setApiBase(e.target.value)}
+                  onChange={(e) => {
+                    stopRestoring();
+                    setApiBase(e.target.value);
+                  }}
                   hint={t('login.custom_connection_hint')}
                 />
               )}
@@ -283,7 +328,10 @@ export function LoginPage() {
                 name="cpa-management-key"
                 autoComplete="current-password"
                 value={managementKey}
-                onChange={(e) => setManagementKey(e.target.value)}
+                onChange={(e) => {
+                  stopRestoring();
+                  setManagementKey(e.target.value);
+                }}
                 onKeyDown={handleSubmitKeyDown}
                 rightElement={
                   <button
@@ -309,7 +357,10 @@ export function LoginPage() {
               <div className={styles.toggleAdvanced}>
                 <SelectionCheckbox
                   checked={rememberPassword}
-                  onChange={setRememberPassword}
+                  onChange={(checked) => {
+                    stopRestoring();
+                    setRememberPassword(checked);
+                  }}
                   ariaLabel={t('login.remember_password_label')}
                   label={t('login.remember_password_label')}
                   labelClassName={styles.toggleLabel}
@@ -320,10 +371,26 @@ export function LoginPage() {
                 {loading ? t('login.submitting') : t('login.submit_button')}
               </Button>
 
-              {error && <div className={styles.errorBox}>{error}</div>}
+              {/* Screen readers get both from the live region below, so these stay out of its way. */}
+              {error && (
+                <div className={styles.errorBox} aria-hidden="true">
+                  {error}
+                </div>
+              )}
+              {retrying && (
+                <div className={styles.retryHint} aria-hidden="true">
+                  {t('login.retrying_hint')}
+                </div>
+              )}
             </div>
           </div>
         )}
+        {/* Mounted before the splash gives way to the form: screen readers announce a live
+            region's changes, not its arrival with text already in it. */}
+        {/* Read whole on every change, so the error alone, once the hint goes, says it gave up. */}
+        <div className={styles.srOnly} role="status" aria-live="polite" aria-atomic="true">
+          {[error, retrying ? t('login.retrying_hint') : ''].filter(Boolean).join(' ')}
+        </div>
       </div>
     </div>
   );

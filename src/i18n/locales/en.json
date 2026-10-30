@@ -81,6 +81,7 @@
     "error_invalid": "Connection failed, please check the server address, Management API, and management key",
     "error_network": "Network connection failed, please check your network or server address",
     "error_timeout": "Connection timed out, server not responding",
+    "retrying_hint": "The server isn't ready yet. Retrying automatically with your saved key…",
     "error_unauthorized": "Authentication failed, management key is missing or invalid",
     "error_forbidden": "Access denied, remote management is disabled, the management key is not configured, or this IP is temporarily banned",
     "error_not_found": "Management API not found, confirm the server address points to the CLIProxyAPI backend",
