@@ -6,26 +6,26 @@ import { LoadingSpinner } from '@/components/ui/LoadingSpinner';
 export function ProtectedRoute({ children }: { children: ReactElement }) {
   const location = useLocation();
   const isAuthenticated = useAuthStore((state) => state.isAuthenticated);
-  const managementKey = useAuthStore((state) => state.managementKey);
-  const apiBase = useAuthStore((state) => state.apiBase);
-  const checkAuth = useAuthStore((state) => state.checkAuth);
-  const [checking, setChecking] = useState(false);
+  const restoreSession = useAuthStore((state) => state.restoreSession);
+  const [restoreFailed, setRestoreFailed] = useState(false);
 
+  // Restore in place, so a reload keeps its URL; only a failed restore goes to the login page.
   useEffect(() => {
-    const tryRestore = async () => {
-      if (!isAuthenticated && managementKey && apiBase) {
-        setChecking(true);
-        try {
-          await checkAuth();
-        } finally {
-          setChecking(false);
-        }
-      }
+    if (isAuthenticated) return;
+    let active = true;
+    restoreSession().then((outcome) => {
+      if (active && outcome.status !== 'restored') setRestoreFailed(true);
+    });
+    return () => {
+      active = false;
     };
-    tryRestore();
-  }, [apiBase, isAuthenticated, managementKey, checkAuth]);
+  }, [isAuthenticated, restoreSession]);
 
-  if (checking) {
+  if (isAuthenticated) {
+    return children;
+  }
+
+  if (!restoreFailed) {
     return (
       <div className="main-content">
         <LoadingSpinner />
@@ -33,9 +33,5 @@ export function ProtectedRoute({ children }: { children: ReactElement }) {
     );
   }
 
-  if (!isAuthenticated) {
-    return <Navigate to="/login" replace state={{ from: location }} />;
-  }
-
-  return children;
+  return <Navigate to="/login" replace state={{ from: location }} />;
 }

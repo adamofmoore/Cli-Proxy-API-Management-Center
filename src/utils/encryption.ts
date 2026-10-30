@@ -5,7 +5,10 @@
  * IMPORTANT: 这不是安全边界。浏览器端长期持久化的密钥仍应视为可被读取。
  */
 
-const ENC_PREFIX = 'enc::v1::';
+// v1 keyed the bytes to the user-agent, so every browser update made saved values unreadable.
+// v2 keys them to the host alone; v1 is still read so existing values can be migrated.
+const ENC_PREFIX = 'enc::v2::';
+const LEGACY_ENC_PREFIX = 'enc::v1::';
 const SECRET_SALT = 'cli-proxy-api-webui::secure-storage';
 
 let cachedKeyBytes: Uint8Array | null = null;
@@ -24,15 +27,21 @@ function getKeyBytes(): Uint8Array {
   if (cachedKeyBytes) return cachedKeyBytes;
 
   try {
-    const host = window.location.host;
-    const ua = navigator.userAgent;
-    cachedKeyBytes = encodeText(`${SECRET_SALT}|${host}|${ua}`);
+    cachedKeyBytes = encodeText(`${SECRET_SALT}|${window.location.host}`);
   } catch (error) {
     console.warn('Obfuscation fallback to simple key:', error);
     cachedKeyBytes = encodeText(SECRET_SALT);
   }
 
   return cachedKeyBytes;
+}
+
+function getLegacyKeyBytes(): Uint8Array {
+  try {
+    return encodeText(`${SECRET_SALT}|${window.location.host}|${navigator.userAgent}`);
+  } catch {
+    return encodeText(SECRET_SALT);
+  }
 }
 
 function xorBytes(data: Uint8Array, keyBytes: Uint8Array): Uint8Array {
@@ -80,15 +89,19 @@ export function obfuscateData(value: string): string {
  * 解密数据
  */
 export function deobfuscateData(payload: string): string {
-  if (!payload || !payload.startsWith(ENC_PREFIX)) {
+  const prefix = payload?.startsWith(ENC_PREFIX)
+    ? ENC_PREFIX
+    : payload?.startsWith(LEGACY_ENC_PREFIX)
+      ? LEGACY_ENC_PREFIX
+      : null;
+  if (!prefix) {
     return payload;
   }
 
   try {
-    const encodedBody = payload.slice(ENC_PREFIX.length);
-    const encrypted = fromBase64(encodedBody);
-    const decrypted = xorBytes(encrypted, getKeyBytes());
-    return decodeText(decrypted);
+    const encrypted = fromBase64(payload.slice(prefix.length));
+    const keyBytes = prefix === ENC_PREFIX ? getKeyBytes() : getLegacyKeyBytes();
+    return decodeText(xorBytes(encrypted, keyBytes));
   } catch (error) {
     console.warn('Deobfuscation failed, return as-is:', error);
     return payload;
@@ -99,5 +112,12 @@ export function deobfuscateData(payload: string): string {
  * 检查是否已加密
  */
 export function isObfuscated(value: string): boolean {
-  return value?.startsWith(ENC_PREFIX) || false;
+  return value?.startsWith(ENC_PREFIX) || isLegacyObfuscated(value);
+}
+
+/**
+ * Whether the value uses the user-agent-keyed v1 format, which a browser update can make unreadable.
+ */
+export function isLegacyObfuscated(value: string): boolean {
+  return value?.startsWith(LEGACY_ENC_PREFIX) || false;
 }

@@ -81,6 +81,7 @@
     "error_invalid": "連線失敗，請檢查服務位址、管理介面和管理金鑰",
     "error_network": "網路連線失敗，請檢查網路或伺服器位址",
     "error_timeout": "連線逾時，伺服器無回應",
+    "retrying_hint": "暫時無法連線伺服器，正在使用已儲存的金鑰自動重試…",
     "error_unauthorized": "驗證失敗，管理金鑰缺失或無效",
     "error_forbidden": "存取被拒絕，遠端管理未啟用、管理金鑰未設定或 IP 被暫時封鎖",
     "error_not_found": "找不到 Management API，請確認服務位址指向 CLIProxyAPI 後端",

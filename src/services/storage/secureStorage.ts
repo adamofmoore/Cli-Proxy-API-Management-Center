@@ -5,7 +5,12 @@
  * IMPORTANT: 这不是安全边界，仅用于避免“肉眼直读”的轻度混淆。
  */
 
-import { obfuscateData, deobfuscateData, isObfuscated } from '@/utils/encryption';
+import {
+  obfuscateData,
+  deobfuscateData,
+  isLegacyObfuscated,
+  isObfuscated,
+} from '@/utils/encryption';
 
 interface StorageOptions {
   /**
@@ -17,6 +22,8 @@ interface StorageOptions {
 }
 
 class ObfuscatedStorageService {
+  constructor(private readonly backend: () => Storage) {}
+
   /**
    * 存储数据
    */
@@ -31,7 +38,7 @@ class ObfuscatedStorageService {
     const stringValue = JSON.stringify(value);
     const storedValue = obfuscate ? obfuscateData(stringValue) : stringValue;
 
-    localStorage.setItem(key, storedValue);
+    this.backend().setItem(key, storedValue);
   }
 
   /**
@@ -40,12 +47,17 @@ class ObfuscatedStorageService {
   getItem<T = unknown>(key: string, options: StorageOptions = {}): T | null {
     const obfuscate = options.obfuscate ?? options.encrypt ?? true;
 
-    const raw = localStorage.getItem(key);
+    const raw = this.backend().getItem(key);
     if (raw === null) return null;
 
     try {
       const decrypted = obfuscate ? deobfuscateData(raw) : raw;
-      return JSON.parse(decrypted) as T;
+      const value = JSON.parse(decrypted) as T;
+      if (obfuscate && isLegacyObfuscated(raw)) {
+        // Rewrite in the browser-version-independent format while this browser can still read it.
+        this.setItem(key, value, options);
+      }
+      return value;
     } catch {
       // JSON解析失败,尝试兼容旧的纯字符串数据 (非JSON格式)
       try {
@@ -68,7 +80,7 @@ class ObfuscatedStorageService {
    * 删除数据
    */
   removeItem(key: string): void {
-    localStorage.removeItem(key);
+    this.backend().removeItem(key);
   }
 
   /**
@@ -76,7 +88,7 @@ class ObfuscatedStorageService {
    */
   migratePlaintextKeys(keys: string[]): void {
     keys.forEach((key) => {
-      const raw = localStorage.getItem(key);
+      const raw = this.backend().getItem(key);
       if (!raw) return;
 
       // 如果已经是加密格式，跳过
@@ -101,4 +113,7 @@ class ObfuscatedStorageService {
   }
 }
 
-export const obfuscatedStorage = new ObfuscatedStorageService();
+export const obfuscatedStorage = new ObfuscatedStorageService(() => localStorage);
+
+/** Lives as long as the browser tab: survives reloads, cleared when the tab closes. */
+export const obfuscatedSessionStorage = new ObfuscatedStorageService(() => sessionStorage);

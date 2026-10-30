@@ -21,5 +21,12 @@ export interface AuthState {
   supportsPlugin: boolean;
 }
 
+// 恢复会话的结果
+export type RestoreOutcome =
+  | { status: 'restored' }
+  | { status: 'none' }
+  /** `retryable`: the proxy could not be reached or failed, so the same key may work shortly. */
+  | { status: 'failed'; retryable: boolean; error: unknown };
+
 // 连接状态
 export type ConnectionStatus = 'connected' | 'disconnected' | 'connecting' | 'error';

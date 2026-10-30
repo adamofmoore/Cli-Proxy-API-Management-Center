@@ -30,6 +30,8 @@ export const MAX_AUTH_FILE_SIZE = 10 * 1024 * 1024;
 
 // 本地存储键名
 export const STORAGE_KEY_AUTH = 'cli-proxy-auth';
+// The signed-in key for this tab only, so a reload works without remember-password.
+export const STORAGE_KEY_AUTH_SESSION = 'cli-proxy-auth-session';
 export const STORAGE_KEY_THEME = 'cli-proxy-theme';
 export const STORAGE_KEY_LANGUAGE = 'cli-proxy-language';
 

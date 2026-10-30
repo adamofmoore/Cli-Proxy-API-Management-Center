@@ -5,9 +5,15 @@
 
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
-import type { AuthState, LoginCredentials, ConnectionStatus } from '@/types';
-import { STORAGE_KEY_AUTH } from '@/utils/constants';
-import { obfuscatedStorage } from '@/services/storage/secureStorage';
+import type {
+  ApiError,
+  AuthState,
+  LoginCredentials,
+  ConnectionStatus,
+  RestoreOutcome,
+} from '@/types';
+import { STORAGE_KEY_AUTH, STORAGE_KEY_AUTH_SESSION } from '@/utils/constants';
+import { obfuscatedSessionStorage, obfuscatedStorage } from '@/services/storage/secureStorage';
 import { apiClient } from '@/services/api/client';
 import { useConfigStore } from './useConfigStore';
 import { useModelsStore } from './useModelsStore';
@@ -20,13 +26,23 @@ interface AuthStoreState extends AuthState {
   // 操作
   login: (credentials: LoginCredentials) => Promise<void>;
   logout: () => void;
-  checkAuth: () => Promise<boolean>;
-  restoreSession: () => Promise<boolean>;
+  restoreSession: () => Promise<RestoreOutcome>;
   updateServerVersion: (version: string | null, buildDate?: string | null) => void;
   updateServerPluginSupport: (supportsPlugin: boolean) => void;
 }
 
-let restoreSessionPromise: Promise<boolean> | null = null;
+type TabSession = { apiBase?: string; managementKey?: string };
+
+const LEGACY_SESSION_KEYS = ['isLoggedIn', 'apiBase', 'apiUrl', 'managementKey'];
+
+let restoreSessionPromise: Promise<RestoreOutcome> | null = null;
+
+/** No response, a timeout, or a server-side failure: the proxy may be restarting. */
+export const isRetryableConnectionError = (error: unknown): boolean => {
+  const status = (error as Partial<ApiError> | null)?.status;
+  if (typeof status !== 'number') return true;
+  return status === 408 || status === 429 || status >= 500;
+};
 
 export const useAuthStore = create<AuthStoreState>()(
   persist(
@@ -43,22 +59,25 @@ export const useAuthStore = create<AuthStoreState>()(
 
       // 恢复会话并自动登录
       restoreSession: () => {
+        if (get().isAuthenticated) return Promise.resolve({ status: 'restored' });
         if (restoreSessionPromise) return restoreSessionPromise;
 
-        restoreSessionPromise = (async () => {
+        restoreSessionPromise = (async (): Promise<RestoreOutcome> => {
           obfuscatedStorage.migratePlaintextKeys(['apiBase', 'apiUrl', 'managementKey']);
 
-          const wasLoggedIn = localStorage.getItem('isLoggedIn') === 'true';
           const legacyBase =
             obfuscatedStorage.getItem<string>('apiBase') ||
             obfuscatedStorage.getItem<string>('apiUrl', { encrypt: true });
           const legacyKey = obfuscatedStorage.getItem<string>('managementKey');
+          // Pre-store releases kept the session in these keys; once read, the store owns it.
+          LEGACY_SESSION_KEYS.forEach((key) => localStorage.removeItem(key));
+          const tabSession = obfuscatedSessionStorage.getItem<TabSession>(STORAGE_KEY_AUTH_SESSION);
 
           const { apiBase, managementKey, rememberPassword } = get();
           const resolvedBase = normalizeApiBase(
-            apiBase || legacyBase || detectApiBaseFromLocation()
+            apiBase || tabSession?.apiBase || legacyBase || detectApiBaseFromLocation()
           );
-          const resolvedKey = managementKey || legacyKey || '';
+          const resolvedKey = managementKey || tabSession?.managementKey || legacyKey || '';
           const resolvedRememberPassword =
             rememberPassword || Boolean(managementKey) || Boolean(legacyKey);
 
@@ -69,22 +88,25 @@ export const useAuthStore = create<AuthStoreState>()(
           });
           apiClient.setConfig({ apiBase: resolvedBase, managementKey: resolvedKey });
 
-          if (wasLoggedIn && resolvedBase && resolvedKey) {
-            try {
-              await get().login({
-                apiBase: resolvedBase,
-                managementKey: resolvedKey,
-                rememberPassword: resolvedRememberPassword,
-              });
-              return true;
-            } catch (error) {
-              console.warn('Auto login failed:', error);
-              return false;
-            }
+          if (!resolvedBase || !resolvedKey) {
+            return { status: 'none' };
           }
 
-          return false;
-        })();
+          try {
+            await get().login({
+              apiBase: resolvedBase,
+              managementKey: resolvedKey,
+              rememberPassword: resolvedRememberPassword,
+            });
+            return { status: 'restored' };
+          } catch (error) {
+            console.warn('Auto login failed:', error);
+            return { status: 'failed', retryable: isRetryableConnectionError(error), error };
+          }
+        })().finally(() => {
+          // Single-flight only: a later caller (a retry, another route) must try again.
+          restoreSessionPromise = null;
+        });
 
         return restoreSessionPromise;
       },
@@ -122,11 +144,7 @@ export const useAuthStore = create<AuthStoreState>()(
             rememberPassword,
             connectionStatus: 'connected',
           });
-          if (rememberPassword) {
-            localStorage.setItem('isLoggedIn', 'true');
-          } else {
-            localStorage.removeItem('isLoggedIn');
-          }
+          obfuscatedSessionStorage.setItem(STORAGE_KEY_AUTH_SESSION, { apiBase, managementKey });
         } catch (error: unknown) {
           set({ connectionStatus: 'error' });
           throw error;
@@ -148,39 +166,7 @@ export const useAuthStore = create<AuthStoreState>()(
           supportsPlugin: false,
           connectionStatus: 'disconnected',
         });
-        localStorage.removeItem('isLoggedIn');
-      },
-
-      // 检查认证状态
-      checkAuth: async () => {
-        const { managementKey, apiBase } = get();
-
-        if (!managementKey || !apiBase) {
-          return false;
-        }
-
-        try {
-          // 重新配置客户端
-          apiClient.setConfig({ apiBase, managementKey });
-          set({ supportsPlugin: false });
-
-          // 验证连接
-          await useConfigStore.getState().fetchConfig();
-
-          set({
-            isAuthenticated: true,
-            connectionStatus: 'connected',
-          });
-
-          return true;
-        } catch {
-          set({
-            isAuthenticated: false,
-            connectionStatus: 'error',
-            supportsPlugin: false,
-          });
-          return false;
-        }
+        obfuscatedSessionStorage.removeItem(STORAGE_KEY_AUTH_SESSION);
       },
 
       // 更新服务器版本
@@ -199,8 +185,9 @@ export const useAuthStore = create<AuthStoreState>()(
       name: STORAGE_KEY_AUTH,
       storage: createJSONStorage(() => ({
         getItem: (name) => {
-          const data = obfuscatedStorage.getItem<AuthStoreState>(name);
-          return data ? JSON.stringify(data) : null;
+          const data = obfuscatedStorage.getItem<unknown>(name);
+          // Anything but an object is a save this browser can no longer read: start signed out.
+          return data && typeof data === 'object' ? JSON.stringify(data) : null;
         },
         setItem: (name, value) => {
           obfuscatedStorage.setItem(name, JSON.parse(value));

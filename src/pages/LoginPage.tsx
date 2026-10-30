@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState, useCallback } from 'react';
+import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import { Navigate, useNavigate, useLocation } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/Button';
@@ -17,7 +17,10 @@ import styles from './LoginPage.module.scss';
 /**
  * 将 API 错误转换为本地化的用户友好消息
  */
-type RedirectState = { from?: { pathname?: string } };
+type RedirectState = { from?: { pathname?: string; search?: string } };
+
+const RETRY_BASE_DELAY_MS = 2000;
+const RETRY_MAX_DELAY_MS = 15000;
 
 function getLocalizedErrorMessage(error: unknown, t: (key: string) => string): string {
   const apiError = error as Partial<ApiError>;
@@ -91,9 +94,6 @@ export function LoginPage() {
   const isAuthenticated = useAuthStore((state) => state.isAuthenticated);
   const login = useAuthStore((state) => state.login);
   const restoreSession = useAuthStore((state) => state.restoreSession);
-  const storedBase = useAuthStore((state) => state.apiBase);
-  const storedKey = useAuthStore((state) => state.managementKey);
-  const storedRememberPassword = useAuthStore((state) => state.rememberPassword);
 
   const [apiBase, setApiBase] = useState('');
   const [managementKey, setManagementKey] = useState('');
@@ -101,9 +101,25 @@ export function LoginPage() {
   const [showKey, setShowKey] = useState(false);
   const [rememberPassword, setRememberPassword] = useState(false);
   const [loading, setLoading] = useState(false);
-  const [autoLoading, setAutoLoading] = useState(true);
+  // Already signed in (e.g. navigated here by hand): nothing to restore, just go back.
+  const [autoLoading, setAutoLoading] = useState(() => !useAuthStore.getState().isAuthenticated);
   const [autoLoginSuccess, setAutoLoginSuccess] = useState(false);
+  const [retrying, setRetrying] = useState(false);
   const [error, setError] = useState('');
+  const retryTimer = useRef<number | null>(null);
+
+  const fromState = (location.state as RedirectState | null)?.from;
+  const redirectTarget = fromState?.pathname
+    ? `${fromState.pathname}${fromState.search ?? ''}`
+    : '/';
+
+  const cancelRetry = useCallback(() => {
+    if (retryTimer.current !== null) {
+      window.clearTimeout(retryTimer.current);
+      retryTimer.current = null;
+    }
+    setRetrying(false);
+  }, []);
 
   const detectedBase = useMemo(() => detectApiBaseFromLocation(), []);
   const languageOptions = useMemo(
@@ -125,28 +141,54 @@ export function LoginPage() {
   );
 
   useEffect(() => {
-    const init = async () => {
-      try {
-        const autoLoggedIn = await restoreSession();
-        if (autoLoggedIn) {
-          setAutoLoginSuccess(true);
-          // 延迟跳转，让用户看到成功动画
-          setTimeout(() => {
-            const redirect = (location.state as RedirectState | null)?.from?.pathname || '/';
-            navigate(redirect, { replace: true });
-          }, 1500);
-        } else {
-          setApiBase(storedBase || detectedBase);
-          setManagementKey(storedKey || '');
-          setRememberPassword(storedRememberPassword || Boolean(storedKey));
-        }
-      } finally {
-        // 自动登录成功时 showSplash 仍由 autoLoginSuccess 维持，可无条件结束 loading
-        setAutoLoading(false);
+    if (!autoLoading) return;
+    let active = true;
+    let failures = 0;
+    let redirectTimer: number | null = null;
+
+    const attemptRestore = async () => {
+      const outcome = await restoreSession();
+      if (!active) return;
+
+      if (outcome.status === 'restored') {
+        setRetrying(false);
+        setAutoLoginSuccess(true);
+        // 延迟跳转，让用户看到成功动画
+        redirectTimer = window.setTimeout(() => navigate(redirectTarget, { replace: true }), 1500);
+        return;
       }
+
+      if (failures === 0) {
+        const stored = useAuthStore.getState();
+        setApiBase(stored.apiBase || detectedBase);
+        setManagementKey(stored.managementKey || '');
+        setRememberPassword(stored.rememberPassword || Boolean(stored.managementKey));
+      }
+
+      if (outcome.status === 'failed') {
+        setError(getLocalizedErrorMessage(outcome.error, t));
+        if (outcome.retryable) {
+          // The proxy is down or restarting: keep the key and get back in once it answers.
+          failures += 1;
+          setRetrying(true);
+          const delay = Math.min(RETRY_BASE_DELAY_MS * 2 ** (failures - 1), RETRY_MAX_DELAY_MS);
+          retryTimer.current = window.setTimeout(attemptRestore, delay);
+          return;
+        }
+      }
+      setRetrying(false);
     };
 
-    init();
+    attemptRestore().finally(() => {
+      // 自动登录成功时 showSplash 仍由 autoLoginSuccess 维持，可无条件结束 loading
+      if (active) setAutoLoading(false);
+    });
+
+    return () => {
+      active = false;
+      if (retryTimer.current !== null) window.clearTimeout(retryTimer.current);
+      if (redirectTimer !== null) window.clearTimeout(redirectTimer);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -157,6 +199,7 @@ export function LoginPage() {
     }
 
     const baseToUse = apiBase ? normalizeApiBase(apiBase) : detectedBase;
+    cancelRetry();
     setLoading(true);
     setError('');
     try {
@@ -166,7 +209,7 @@ export function LoginPage() {
         rememberPassword,
       });
       showNotification(t('common.connected_status'), 'success');
-      navigate('/', { replace: true });
+      navigate(redirectTarget, { replace: true });
     } catch (err: unknown) {
       const message = getLocalizedErrorMessage(err, t);
       setError(message);
@@ -176,10 +219,12 @@ export function LoginPage() {
     }
   }, [
     apiBase,
+    cancelRetry,
     detectedBase,
     login,
     managementKey,
     navigate,
+    redirectTarget,
     rememberPassword,
     showNotification,
     t,
@@ -196,8 +241,7 @@ export function LoginPage() {
   );
 
   if (isAuthenticated && !autoLoading && !autoLoginSuccess) {
-    const redirect = (location.state as RedirectState | null)?.from?.pathname || '/';
-    return <Navigate to={redirect} replace />;
+    return <Navigate to={redirectTarget} replace />;
   }
 
   // 显示启动动画（自动登录中或自动登录成功）
@@ -270,7 +314,10 @@ export function LoginPage() {
                   label={t('login.custom_connection_label')}
                   placeholder={t('login.custom_connection_placeholder')}
                   value={apiBase}
-                  onChange={(e) => setApiBase(e.target.value)}
+                  onChange={(e) => {
+                    cancelRetry();
+                    setApiBase(e.target.value);
+                  }}
                   hint={t('login.custom_connection_hint')}
                 />
               )}
@@ -283,7 +330,10 @@ export function LoginPage() {
                 name="cpa-management-key"
                 autoComplete="current-password"
                 value={managementKey}
-                onChange={(e) => setManagementKey(e.target.value)}
+                onChange={(e) => {
+                  cancelRetry();
+                  setManagementKey(e.target.value);
+                }}
                 onKeyDown={handleSubmitKeyDown}
                 rightElement={
                   <button
@@ -321,6 +371,11 @@ export function LoginPage() {
               </Button>
 
               {error && <div className={styles.errorBox}>{error}</div>}
+              {retrying && (
+                <div className={styles.retryHint} role="status" aria-live="polite">
+                  {t('login.retrying_hint')}
+                </div>
+              )}
             </div>
           </div>
         )}
