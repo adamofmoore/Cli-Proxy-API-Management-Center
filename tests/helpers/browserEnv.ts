@@ -53,9 +53,18 @@ export const SAVED_AUTH = JSON.stringify({
 });
 
 const g = globalThis as unknown as Record<string, unknown>;
+const INSTALLED_GLOBALS = ['localStorage', 'sessionStorage', 'window'] as const;
+let saved: { globals: Map<string, PropertyDescriptor | undefined>; userAgent?: PropertyDescriptor } | null =
+  null;
 
-/** Installs the browser globals the auth stores read, with empty storage. */
+/** Installs the browser globals the auth stores read, with empty storage. Undo with `uninstallBrowserEnv`. */
 export function installBrowserEnv(userAgent = CHROME_141) {
+  if (!saved) {
+    saved = {
+      globals: new Map(INSTALLED_GLOBALS.map((name) => [name, Object.getOwnPropertyDescriptor(g, name)])),
+      userAgent: Object.getOwnPropertyDescriptor(globalThis.navigator, 'userAgent'),
+    };
+  }
   const events = new EventTarget();
   g.localStorage = new MemoryStorage();
   g.sessionStorage = new MemoryStorage();
@@ -66,6 +75,18 @@ export function installBrowserEnv(userAgent = CHROME_141) {
     dispatchEvent: events.dispatchEvent.bind(events),
   };
   setUserAgent(userAgent);
+}
+
+/** Puts back whatever globals existed before `installBrowserEnv`. */
+export function uninstallBrowserEnv() {
+  if (!saved) return;
+  for (const [name, descriptor] of saved.globals) {
+    if (descriptor) Object.defineProperty(g, name, descriptor);
+    else delete g[name];
+  }
+  if (saved.userAgent) Object.defineProperty(globalThis.navigator, 'userAgent', saved.userAgent);
+  else delete (globalThis.navigator as unknown as Record<string, unknown>).userAgent;
+  saved = null;
 }
 
 export function setUserAgent(userAgent: string) {

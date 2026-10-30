@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import {
   CHROME_141,
   CHROME_142,
@@ -7,6 +7,7 @@ import {
   legacyObfuscate,
   SAVED_AUTH,
   setUserAgent,
+  uninstallBrowserEnv,
 } from './helpers/browserEnv';
 
 type EncryptionModule = typeof import('../src/utils/encryption');
@@ -14,6 +15,7 @@ const loadEncryption = () => freshImport<EncryptionModule>('../src/utils/encrypt
 
 describe('saved login survives browser updates', () => {
   beforeEach(() => installBrowserEnv(CHROME_141));
+  afterEach(() => uninstallBrowserEnv());
 
   test('a value saved on one Chrome version reads back after Chrome updates', async () => {
     const before = await loadEncryption();

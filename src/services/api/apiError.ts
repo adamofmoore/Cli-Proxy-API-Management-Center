@@ -1,3 +1,4 @@
+import type { ApiError } from '@/types';
 import { isRecord } from '@/utils/helpers';
 
 export interface ParsedApiErrorResponse {
@@ -37,4 +38,17 @@ export const parseApiErrorResponse = (
     'Request failed';
 
   return { message, apiCode };
+};
+
+// Axios codes for a request that never got an answer: the server is down, restarting or slow.
+const UNANSWERED_REQUEST_CODES = new Set(['ERR_NETWORK', 'ECONNABORTED', 'ETIMEDOUT']);
+
+/**
+ * Whether the same request may succeed shortly: no answer, a timeout, rate limiting, or a
+ * server-side failure. A rejected key, a wrong address (404) or a client bug is not.
+ */
+export const isRetryableConnectionError = (error: unknown): boolean => {
+  const { status, code } = (error ?? {}) as Partial<ApiError>;
+  if (typeof status === 'number') return status === 408 || status === 429 || status >= 500;
+  return typeof code === 'string' && UNANSWERED_REQUEST_CODES.has(code);
 };

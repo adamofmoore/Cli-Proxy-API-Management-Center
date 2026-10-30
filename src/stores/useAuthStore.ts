@@ -6,15 +6,19 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import type {
-  ApiError,
   AuthState,
   LoginCredentials,
   ConnectionStatus,
   RestoreOutcome,
 } from '@/types';
-import { STORAGE_KEY_AUTH, STORAGE_KEY_AUTH_SESSION } from '@/utils/constants';
+import {
+  LEGACY_AUTH_STORAGE_KEYS,
+  STORAGE_KEY_AUTH,
+  STORAGE_KEY_AUTH_SESSION,
+} from '@/utils/constants';
 import { obfuscatedSessionStorage, obfuscatedStorage } from '@/services/storage/secureStorage';
 import { apiClient } from '@/services/api/client';
+import { isRetryableConnectionError } from '@/services/api/apiError';
 import { useConfigStore } from './useConfigStore';
 import { useModelsStore } from './useModelsStore';
 import { useQuotaStore } from './useQuotaStore';
@@ -27,21 +31,76 @@ interface AuthStoreState extends AuthState {
   login: (credentials: LoginCredentials) => Promise<void>;
   logout: () => void;
   restoreSession: () => Promise<RestoreOutcome>;
+  /** Makes a restore in flight fail as superseded instead of signing in. */
+  cancelRestore: () => void;
   updateServerVersion: (version: string | null, buildDate?: string | null) => void;
   updateServerPluginSupport: (supportsPlugin: boolean) => void;
 }
 
-type TabSession = { apiBase?: string; managementKey?: string };
-
-const LEGACY_SESSION_KEYS = ['isLoggedIn', 'apiBase', 'apiUrl', 'managementKey'];
+type SavedSession = Required<LoginCredentials>;
 
 let restoreSessionPromise: Promise<RestoreOutcome> | null = null;
+// Bumped by every login and logout, so an attempt that was overtaken never commits its result.
+let loginGeneration = 0;
 
-/** No response, a timeout, or a server-side failure: the proxy may be restarting. */
-export const isRetryableConnectionError = (error: unknown): boolean => {
-  const status = (error as Partial<ApiError> | null)?.status;
-  if (typeof status !== 'number') return true;
-  return status === 408 || status === 429 || status >= 500;
+const supersededLogin = () => {
+  const error = new Error('Sign-in was superseded by a newer attempt');
+  error.name = 'LoginSupersededError';
+  return error;
+};
+
+/**
+ * Releases before the auth store kept the session in loose keys and gated auto-login on
+ * `isLoggedIn`; logging out cleared only the flag. Read them once, then remove them.
+ */
+const takeLegacySession = (): SavedSession | null => {
+  obfuscatedStorage.migratePlaintextKeys(['apiBase', 'apiUrl', 'managementKey']);
+  const wasLoggedIn = localStorage.getItem('isLoggedIn') === 'true';
+  const base =
+    obfuscatedStorage.getItem<string>('apiBase') ||
+    obfuscatedStorage.getItem<string>('apiUrl', { encrypt: true });
+  const key = obfuscatedStorage.getItem<string>('managementKey');
+  LEGACY_AUTH_STORAGE_KEYS.forEach((name) => localStorage.removeItem(name));
+  if (!wasLoggedIn || typeof key !== 'string' || !key) return null;
+  return {
+    apiBase: normalizeApiBase(base || detectApiBaseFromLocation()),
+    managementKey: key,
+    rememberPassword: true,
+  };
+};
+
+/**
+ * The session to restore, newest owner first: this tab, then the remembered sign-in, then a
+ * legacy one. Address, key and remember choice always come from one source; mixing them
+ * could send one server's key to another, or remember a key the user chose not to.
+ */
+const resolveSavedSession = (state: AuthState): SavedSession | null => {
+  const legacy = takeLegacySession();
+  const tab = obfuscatedSessionStorage.getItem<Partial<SavedSession>>(STORAGE_KEY_AUTH_SESSION);
+  if (tab?.apiBase && tab.managementKey) {
+    return {
+      apiBase: normalizeApiBase(tab.apiBase),
+      managementKey: tab.managementKey,
+      rememberPassword: tab.rememberPassword === true,
+    };
+  }
+  if (state.managementKey) {
+    return {
+      apiBase: normalizeApiBase(state.apiBase || detectApiBaseFromLocation()),
+      managementKey: state.managementKey,
+      rememberPassword: state.rememberPassword,
+    };
+  }
+  return legacy;
+};
+
+const keepSessionForTab = (session: SavedSession) => {
+  try {
+    obfuscatedSessionStorage.setItem(STORAGE_KEY_AUTH_SESSION, session);
+  } catch (error) {
+    // Costs only staying signed in across a reload; the sign-in itself succeeded.
+    console.warn('Could not keep the session for this tab:', error);
+  }
 };
 
 export const useAuthStore = create<AuthStoreState>()(
@@ -62,42 +121,12 @@ export const useAuthStore = create<AuthStoreState>()(
         if (get().isAuthenticated) return Promise.resolve({ status: 'restored' });
         if (restoreSessionPromise) return restoreSessionPromise;
 
-        restoreSessionPromise = (async (): Promise<RestoreOutcome> => {
-          obfuscatedStorage.migratePlaintextKeys(['apiBase', 'apiUrl', 'managementKey']);
-
-          const legacyBase =
-            obfuscatedStorage.getItem<string>('apiBase') ||
-            obfuscatedStorage.getItem<string>('apiUrl', { encrypt: true });
-          const legacyKey = obfuscatedStorage.getItem<string>('managementKey');
-          // Pre-store releases kept the session in these keys; once read, the store owns it.
-          LEGACY_SESSION_KEYS.forEach((key) => localStorage.removeItem(key));
-          const tabSession = obfuscatedSessionStorage.getItem<TabSession>(STORAGE_KEY_AUTH_SESSION);
-
-          const { apiBase, managementKey, rememberPassword } = get();
-          const resolvedBase = normalizeApiBase(
-            apiBase || tabSession?.apiBase || legacyBase || detectApiBaseFromLocation()
-          );
-          const resolvedKey = managementKey || tabSession?.managementKey || legacyKey || '';
-          const resolvedRememberPassword =
-            rememberPassword || Boolean(managementKey) || Boolean(legacyKey);
-
-          set({
-            apiBase: resolvedBase,
-            managementKey: resolvedKey,
-            rememberPassword: resolvedRememberPassword,
-          });
-          apiClient.setConfig({ apiBase: resolvedBase, managementKey: resolvedKey });
-
-          if (!resolvedBase || !resolvedKey) {
-            return { status: 'none' };
-          }
-
+        const attempt: Promise<RestoreOutcome> = (async (): Promise<RestoreOutcome> => {
           try {
-            await get().login({
-              apiBase: resolvedBase,
-              managementKey: resolvedKey,
-              rememberPassword: resolvedRememberPassword,
-            });
+            const session = resolveSavedSession(get());
+            if (!session) return { status: 'none' };
+            set(session);
+            await get().login(session);
             return { status: 'restored' };
           } catch (error) {
             console.warn('Auto login failed:', error);
@@ -105,10 +134,17 @@ export const useAuthStore = create<AuthStoreState>()(
           }
         })().finally(() => {
           // Single-flight only: a later caller (a retry, another route) must try again.
-          restoreSessionPromise = null;
+          if (restoreSessionPromise === attempt) restoreSessionPromise = null;
         });
 
-        return restoreSessionPromise;
+        restoreSessionPromise = attempt;
+        return attempt;
+      },
+
+      cancelRestore: () => {
+        if (!restoreSessionPromise) return;
+        restoreSessionPromise = null;
+        loginGeneration += 1;
       },
 
       // 登录
@@ -116,6 +152,7 @@ export const useAuthStore = create<AuthStoreState>()(
         const apiBase = normalizeApiBase(credentials.apiBase);
         const managementKey = credentials.managementKey.trim();
         const rememberPassword = credentials.rememberPassword ?? get().rememberPassword ?? false;
+        const generation = (loginGeneration += 1);
 
         try {
           set({
@@ -124,6 +161,8 @@ export const useAuthStore = create<AuthStoreState>()(
             serverBuildDate: null,
             supportsPlugin: false,
           });
+          // New credentials: a /config request already in flight was sent with the old ones.
+          useConfigStore.getState().clearCache();
           useModelsStore.getState().clearCache();
           useQuotaStore.getState().clearQuotaCache();
 
@@ -135,7 +174,9 @@ export const useAuthStore = create<AuthStoreState>()(
 
           // 测试连接 - 获取配置
           await useConfigStore.getState().fetchConfig(true);
+          if (generation !== loginGeneration) throw supersededLogin();
 
+          keepSessionForTab({ apiBase, managementKey, rememberPassword });
           // 登录成功
           set({
             isAuthenticated: true,
@@ -144,9 +185,8 @@ export const useAuthStore = create<AuthStoreState>()(
             rememberPassword,
             connectionStatus: 'connected',
           });
-          obfuscatedSessionStorage.setItem(STORAGE_KEY_AUTH_SESSION, { apiBase, managementKey });
         } catch (error: unknown) {
-          set({ connectionStatus: 'error' });
+          if (generation === loginGeneration) set({ connectionStatus: 'error' });
           throw error;
         }
       },
@@ -154,12 +194,13 @@ export const useAuthStore = create<AuthStoreState>()(
       // 登出
       logout: () => {
         restoreSessionPromise = null;
+        loginGeneration += 1;
         useConfigStore.getState().clearCache();
         useModelsStore.getState().clearCache();
         useQuotaStore.getState().clearQuotaCache();
+        // The server address stays: it is not a secret, and the login form offers it again.
         set({
           isAuthenticated: false,
-          apiBase: '',
           managementKey: '',
           serverVersion: null,
           serverBuildDate: null,
